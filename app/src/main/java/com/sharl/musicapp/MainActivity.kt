@@ -2,6 +2,7 @@ package com.sharl.musicapp
 
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -14,8 +15,11 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
@@ -47,6 +51,8 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    var status by remember { mutableStateOf("Idle") }
+
     val player = remember {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri("android.resource://${context.packageName}/${R.raw.sample}"))
@@ -63,7 +69,16 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Button(onClick = { player.play() }) {
+        Button(
+            onClick = {
+                player.setMediaItem(
+                    MediaItem.fromUri("android.resource://${context.packageName}/${R.raw.sample}")
+                )
+                player.prepare()
+                player.play()
+                status = "Playing (local)"
+            }
+        ) {
             Text("Play")
         }
         Button(
@@ -74,21 +89,38 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
         }
         Button(
             onClick = {
+                status = "Extracting..."
                 scope.launch {
                     try {
                         val url = YtdlpHelper.extractAudioUrl(context, TEST_VIDEO_URL)
                         if (url != null) {
                             Log.d("YTDL", "URL: $url")
+                            player.setMediaItem(MediaItem.fromUri(url))
+                            player.prepare()
+                            player.play()
+                            status = "Playing"
+                        } else {
+                            val msg = "extraction returned null"
+                            Log.e("YTDL", "Failed: $msg")
+                            status = "Error: $msg"
+                            Toast.makeText(context, "Extraction failed: $msg", Toast.LENGTH_LONG).show()
                         }
                     } catch (e: Exception) {
-                        Log.e("YTDL", "Failed: ${e.message}")
+                        val msg = e.message ?: "unknown error"
+                        Log.e("YTDL", "Failed: $msg")
+                        status = "Error: $msg"
+                        Toast.makeText(context, "Extraction failed: $msg", Toast.LENGTH_LONG).show()
                     }
                 }
             },
             modifier = Modifier.padding(top = 16.dp)
         ) {
-            Text("Test YT Extract")
+            Text("Play YT")
         }
+        Text(
+            text = status,
+            modifier = Modifier.padding(top = 16.dp)
+        )
     }
 }
 
