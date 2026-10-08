@@ -1,0 +1,28 @@
+﻿Starting a Gradle Daemon, 1 stopped Daemon could not be reused, use --status for details
+.\gradlew.bat : 
+At line:1 char:50
++ ... tudioProjects\MusicApp; .\gradlew.bat :app:assembleDebug 2>&1 | Out-F ...
++                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Unable to download toolchain matching the requirements ({languageVersion=25, vendor=any vendor, 
+implementation=vendor-specific, nativeImageCapable=false}) from 
+'https://api.foojay.io/disco/v3.0/ids/d76df094a9cbbabd3b08251f9e61444a/redirect', due to: Could not HEAD 'https://release-ass
+ets.githubusercontent.com/github-production-release-asset/901810329/9a7bff00-9c35-4671-966f-99067cf48118?sp=r&sv=2018-11-09&s
+r=b&spr=https&se=2026-10-08T02%3A48%3A33Z&rscd=attachment%3B+filename%3DOpenJDK25U-jdk_x64_windows_hotspot_25.0.3_9.zip&rsct=
+application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2026-10-
+08T01%3A48%3A24Z&ske=2026-10-08T02%3A48%3A33Z&sks=b&skv=2018-11-09&sig=oGtzhUp2vwlzBAGV0E8gZI6z6Knfu%2BjpEj4cBpTGaLg%3D&jwt=e
+yJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmVsZWFzZS1hc3NldHMuZ2l0aHVidXNlcmNvbnRlbnQuY29tIiwia
+2V5Ijoia2V5MSIsImV4cCI6MTc5MTQyOTI3MCwibmJmIjoxNzkxNDI1NjcwLCJwYXRoIjoicmVsZWFzZWFzc2V0cHJvZHVjdGlvbi5ibG9iLmNvcmUud2luZG93cy
+5uZXQifQ.0hG9gBHVQ79_nrguUXW6qqn7QhZ8QWFWa0Oytzvm_Vw&response-content-disposition=attachment%3B%20filename%3DOpenJDK25U-jdk_x
+64_windows_hotspot_25.0.3_9.zip&response-content-type=application%2Foctet-stream'.
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.

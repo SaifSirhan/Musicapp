@@ -1,6 +1,7 @@
 package com.sharl.musicapp
 
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -14,6 +15,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
@@ -22,6 +24,9 @@ import androidx.compose.ui.unit.dp
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import com.sharl.musicapp.ui.theme.MusicAppTheme
+import kotlinx.coroutines.launch
+
+private const val TEST_VIDEO_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,6 +45,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun PlayerScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     val player = remember {
         ExoPlayer.Builder(context).build().apply {
@@ -65,6 +71,23 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
             modifier = Modifier.padding(top = 16.dp)
         ) {
             Text("Stop")
+        }
+        Button(
+            onClick = {
+                scope.launch {
+                    try {
+                        val url = YtdlpHelper.extractAudioUrl(context, TEST_VIDEO_URL)
+                        if (url != null) {
+                            Log.d("YTDL", "URL: $url")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("YTDL", "Failed: ${e.message}")
+                    }
+                }
+            },
+            modifier = Modifier.padding(top = 16.dp)
+        ) {
+            Text("Test YT Extract")
         }
     }
 }
