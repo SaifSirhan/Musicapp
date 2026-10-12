@@ -11,7 +11,7 @@ interface SongDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(song: Song)
 
-    @Query("SELECT * FROM songs ORDER BY lastPlayedAt DESC LIMIT :limit")
+    @Query("SELECT * FROM songs WHERE lastPlayedAt > 0 AND isHidden = 0 ORDER BY lastPlayedAt DESC LIMIT :limit")
     fun recentlyPlayed(limit: Int = 50): Flow<List<Song>>
 
     @Query("SELECT * FROM songs WHERE videoId = :videoId LIMIT 1")
@@ -23,6 +23,9 @@ interface SongDao {
     @Query("UPDATE songs SET isFavorite = :fav WHERE videoId = :videoId")
     suspend fun setFavorite(videoId: String, fav: Boolean)
 
-    @Query("SELECT * FROM songs WHERE isFavorite = 1 ORDER BY lastPlayedAt DESC")
+    @Query("UPDATE songs SET isHidden = 1 WHERE videoId = :videoId")
+    suspend fun hide(videoId: String)
+
+    @Query("SELECT * FROM songs WHERE isFavorite = 1 AND isHidden = 0 ORDER BY lastPlayedAt DESC")
     fun favorites(): Flow<List<Song>>
 }

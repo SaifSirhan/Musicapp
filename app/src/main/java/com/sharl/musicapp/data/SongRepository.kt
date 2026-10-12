@@ -15,7 +15,8 @@ class SongRepository(context: Context) {
                 artist = artist,
                 lastPlayedAt = now,
                 playCount = (existing?.playCount ?: 0) + 1,
-                isFavorite = existing?.isFavorite ?: false
+                isFavorite = existing?.isFavorite ?: false,
+                isHidden = existing?.isHidden ?: false
             )
         )
     }
@@ -24,6 +25,10 @@ class SongRepository(context: Context) {
 
     suspend fun toggleFavorite(song: Song) {
         dao.setFavorite(song.videoId, !song.isFavorite)
+    }
+
+    suspend fun hide(song: Song) {
+        dao.hide(song.videoId)
     }
 
     fun favorites() = dao.favorites()

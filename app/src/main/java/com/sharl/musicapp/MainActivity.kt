@@ -2,19 +2,26 @@ package com.sharl.musicapp
 
 import android.Manifest
 import android.content.ComponentName
+import android.content.Context
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -30,6 +37,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -37,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -46,6 +55,8 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.sharl.musicapp.data.Song
 import com.sharl.musicapp.data.SongRepository
+import com.sharl.musicapp.ui.theme.AccentOptions
+import com.sharl.musicapp.ui.theme.DefaultAccent
 import com.sharl.musicapp.ui.theme.MusicAppTheme
 import kotlinx.coroutines.launch
 
@@ -58,23 +69,46 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            MusicAppTheme {
+            val context = LocalContext.current
+            val prefs = remember {
+                context.getSharedPreferences("theme", Context.MODE_PRIVATE)
+            }
+            var accentIndex by remember {
+                mutableStateOf(prefs.getInt("accent_index", 0))
+            }
+            val accent = AccentOptions.getOrNull(accentIndex)?.color ?: DefaultAccent
+
+            MusicAppTheme(accent = accent) {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    PlayerScreen(modifier = Modifier.padding(innerPadding))
+                    PlayerScreen(
+                        modifier = Modifier.padding(innerPadding),
+                        accentIndex = accentIndex,
+                        onAccentChange = { idx ->
+                            accentIndex = idx
+                            prefs.edit().putInt("accent_index", idx).apply()
+                        }
+                    )
                 }
             }
         }
     }
 }
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun PlayerScreen(modifier: Modifier = Modifier) {
+fun PlayerScreen(
+    modifier: Modifier = Modifier,
+    accentIndex: Int,
+    onAccentChange: (Int) -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val repo = remember { SongRepository(context) }
     val recent by repo.recentlyPlayed().collectAsState(initial = emptyList())
     val favorites by repo.favorites().collectAsState(initial = emptyList())
     var tab by remember { mutableStateOf(0) }  // 0 = Home, 1 = Search, 2 = Favorites
+    var showColorPicker by remember { mutableStateOf(false) }
+    var menuSong by remember { mutableStateOf<Song?>(null) }
 
     var status by remember { mutableStateOf("Connecting...") }
     var query by remember { mutableStateOf("") }
@@ -88,6 +122,13 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
     var nowPlayingTitle by remember { mutableStateOf<String?>(null) }
     var nowPlayingArtist by remember { mutableStateOf<String?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
+
+    var showNowPlaying by remember { mutableStateOf(false) }
+    var isShuffled by remember { mutableStateOf(false) }
+    var repeatMode by remember { mutableStateOf(0) }  // 0=off, 1=all, 2=one
+
+    val urlCache = remember { mutableStateMapOf<String, String>() }
+    var pendingExtraction by remember { mutableStateOf<String?>(null) }
 
     DisposableEffect(context) {
         Log.d("CTRL", "Connecting to PlaybackService...")
@@ -138,6 +179,14 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    suspend fun extractOrCache(videoId: String): String? {
+        urlCache[videoId]?.let {
+            urlCache.remove(videoId)
+            return it
+        }
+        return YtdlpHelper.extractAudioUrlForId(context, videoId)
+    }
+
     fun playFromQueue(items: List<QueueItem>, index: Int) {
         if (controller == null) {
             status = "Connecting..."
@@ -152,7 +201,7 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
         status = "Extracting..."
         scope.launch {
             try {
-                val url = YtdlpHelper.extractAudioUrlForId(context, item.videoId)
+                val url = extractOrCache(item.videoId)
                 if (url == null) {
                     status = "Error: extraction returned null"
                     return@launch
@@ -173,6 +222,27 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                 controller!!.play()
                 isPlaying = true
                 status = "Playing: ${item.title}"
+
+                val nextIndex = index + 1
+                if (nextIndex in items.indices) {
+                    val nextId = items[nextIndex].videoId
+                    if (!urlCache.containsKey(nextId) && pendingExtraction != nextId) {
+                        pendingExtraction = nextId
+                        scope.launch {
+                            try {
+                                val preUrl = YtdlpHelper.extractAudioUrlForId(context, nextId)
+                                if (preUrl != null) {
+                                    urlCache[nextId] = preUrl
+                                    Log.d("PRECACHE", "cached: $nextId")
+                                }
+                            } catch (e: Exception) {
+                                Log.w("PRECACHE", "pre-extract failed for $nextId", e)
+                            } finally {
+                                if (pendingExtraction == nextId) pendingExtraction = null
+                            }
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 val msg = e.message ?: "unknown error"
                 Log.e("YTDL", "Failed: $msg")
@@ -197,11 +267,75 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
         playFromQueue(queue, queueIndex - 1)
     }
 
+    fun appendToQueue(song: Song) {
+        val item = QueueItem(song.videoId, song.title)
+        queue = queue + item
+        status = "Added to queue: ${song.title}"
+    }
+
+    fun insertIntoQueueNext(song: Song) {
+        val item = QueueItem(song.videoId, song.title)
+        if (queueIndex < 0) {
+            // Nothing playing — start it
+            playFromQueue(listOf(item), 0)
+            return
+        }
+        val insertAt = queueIndex + 1
+        queue = queue.toMutableList().apply { add(insertAt, item) }
+        status = "Playing next: ${song.title}"
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
+        if (showNowPlaying && nowPlayingTitle != null) {
+            androidx.activity.compose.BackHandler(enabled = true) {
+                showNowPlaying = false
+            }
+            NowPlayingScreen(
+                title = nowPlayingTitle ?: "",
+                artist = nowPlayingArtist ?: "",
+                isPlaying = isPlaying,
+                isShuffled = isShuffled,
+                repeatMode = repeatMode,
+                onBack = { showNowPlaying = false },
+                onPlayPause = {
+                    val c = controller ?: return@NowPlayingScreen
+                    if (c.isPlaying) {
+                        c.pause()
+                        isPlaying = false
+                    } else {
+                        c.play()
+                        isPlaying = true
+                    }
+                },
+                onPrev = { playPrev() },
+                onNext = { playNext() },
+                onShuffleToggle = {
+                    isShuffled = !isShuffled
+                    controller?.shuffleModeEnabled = isShuffled
+                },
+                onRepeatToggle = {
+                    repeatMode = (repeatMode + 1) % 3
+                    controller?.repeatMode = when (repeatMode) {
+                        1 -> androidx.media3.common.Player.REPEAT_MODE_ALL
+                        2 -> androidx.media3.common.Player.REPEAT_MODE_ONE
+                        else -> androidx.media3.common.Player.REPEAT_MODE_OFF
+                    }
+                }
+            )
+        } else {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            androidx.compose.material3.IconButton(onClick = { showColorPicker = true }) {
+                Text("⚙", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+            }
+        }
+
         androidx.compose.material3.TabRow(selectedTabIndex = tab) {
             androidx.compose.material3.Tab(
                 selected = tab == 0,
@@ -241,7 +375,8 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                             SongRow(
                                 song = song,
                                 onClick = { playFromQueue(items, idx) },
-                                onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } }
+                                onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } },
+                                onLongClick = { menuSong = song }
                             )
                         }
                     }
@@ -300,7 +435,20 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { playFromQueue(items, idx) }
+                                .combinedClickable(
+                                    onClick = { playFromQueue(items, idx) },
+                                    onLongClick = {
+                                        menuSong = Song(
+                                            videoId = result.videoId,
+                                            title = result.title,
+                                            artist = "YouTube",
+                                            lastPlayedAt = 0L,
+                                            playCount = 0,
+                                            isFavorite = false,
+                                            isHidden = false
+                                        )
+                                    }
+                                )
                                 .padding(vertical = 12.dp)
                         )
                         HorizontalDivider()
@@ -327,7 +475,8 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                             SongRow(
                                 song = song,
                                 onClick = { playFromQueue(items, idx) },
-                                onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } }
+                                onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } },
+                                onLongClick = { menuSong = song }
                             )
                         }
                     }
@@ -439,7 +588,11 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                     .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { showNowPlaying = true }
+                ) {
                     Text(
                         text = nowPlayingTitle ?: "",
                         maxLines = 1,
@@ -477,6 +630,104 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                 }
             }
         }
+
+        if (showColorPicker) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showColorPicker = false },
+                title = { Text("Accent color") },
+                text = {
+                    Column {
+                        AccentOptions.forEachIndexed { idx, option ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        onAccentChange(idx)
+                                        showColorPicker = false
+                                    }
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .background(option.color)
+                                )
+                                androidx.compose.material3.Text(
+                                    text = option.name,
+                                    modifier = Modifier.padding(start = 12.dp)
+                                )
+                                if (idx == accentIndex) {
+                                    androidx.compose.material3.Text(
+                                        text = "  ✓",
+                                        modifier = Modifier.padding(start = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = { showColorPicker = false }) {
+                        Text("Close")
+                    }
+                }
+            )
+        }
+        }
+
+        val song = menuSong
+        if (song != null) {
+            androidx.compose.material3.ModalBottomSheet(
+                onDismissRequest = { menuSong = null }
+            ) {
+                Column(modifier = Modifier.padding(bottom = 24.dp)) {
+                    Text(
+                        text = song.title,
+                        style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    )
+                    HorizontalDivider()
+
+                    MenuItem("Play next") {
+                        insertIntoQueueNext(song)
+                        menuSong = null
+                    }
+                    MenuItem("Add to queue") {
+                        appendToQueue(song)
+                        menuSong = null
+                    }
+                    MenuItem(
+                        if (song.isFavorite) "Remove from favorites" else "Add to favorites"
+                    ) {
+                        scope.launch { repo.toggleFavorite(song) }
+                        menuSong = null
+                    }
+                    MenuItem("Not interested") {
+                        scope.launch { repo.hide(song) }
+                        menuSong = null
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MenuItem(label: String, onClick: () -> Unit) {
+    androidx.compose.material3.TextButton(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text(
+            label,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 4.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Start
+        )
     }
 }
 
@@ -484,12 +735,16 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
 fun SongRow(
     song: Song,
     onClick: () -> Unit,
-    onToggleFavorite: () -> Unit
+    onToggleFavorite: () -> Unit,
+    onLongClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
             .padding(vertical = 12.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -515,10 +770,131 @@ fun SongRow(
     HorizontalDivider()
 }
 
+@Composable
+fun NowPlayingScreen(
+    title: String,
+    artist: String,
+    isPlaying: Boolean,
+    isShuffled: Boolean,
+    repeatMode: Int,
+    onBack: () -> Unit,
+    onPlayPause: () -> Unit,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    onShuffleToggle: () -> Unit,
+    onRepeatToggle: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(androidx.compose.material3.MaterialTheme.colorScheme.background)
+            .padding(24.dp)
+    ) {
+        // Top bar: back button
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            androidx.compose.material3.IconButton(onClick = onBack) {
+                Text(
+                    "←",
+                    style = androidx.compose.material3.MaterialTheme.typography.headlineMedium
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(0.6f))
+
+        // Title and artist, centered
+        Text(
+            text = title,
+            style = androidx.compose.material3.MaterialTheme.typography.headlineMedium,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.size(8.dp))
+        Text(
+            text = artist,
+            style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.weight(0.4f))
+
+        // Shuffle + repeat row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            androidx.compose.material3.IconButton(onClick = onShuffleToggle) {
+                Text(
+                    "🔀",
+                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                    color = if (isShuffled)
+                        androidx.compose.material3.MaterialTheme.colorScheme.primary
+                    else
+                        androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            androidx.compose.material3.IconButton(onClick = onRepeatToggle) {
+                val glyph = when (repeatMode) {
+                    1 -> "🔁"
+                    2 -> "🔂"
+                    else -> "🔁"
+                }
+                Text(
+                    glyph,
+                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                    color = if (repeatMode == 0)
+                        androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                    else
+                        androidx.compose.material3.MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.size(16.dp))
+
+        // Big transport row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            androidx.compose.material3.IconButton(onClick = onPrev) {
+                Text(
+                    "⏮",
+                    style = androidx.compose.material3.MaterialTheme.typography.displaySmall
+                )
+            }
+            androidx.compose.material3.IconButton(onClick = onPlayPause) {
+                Text(
+                    if (isPlaying) "⏸" else "▶",
+                    style = androidx.compose.material3.MaterialTheme.typography.displayMedium,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+                )
+            }
+            androidx.compose.material3.IconButton(onClick = onNext) {
+                Text(
+                    "⏭",
+                    style = androidx.compose.material3.MaterialTheme.typography.displaySmall
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(0.4f))
+    }
+}
+
 @Preview(showBackground = true)
 @Composable
 fun PlayerScreenPreview() {
     MusicAppTheme {
-        PlayerScreen()
+        PlayerScreen(accentIndex = 0, onAccentChange = {})
     }
 }
