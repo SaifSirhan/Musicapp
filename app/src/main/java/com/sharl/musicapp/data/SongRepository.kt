@@ -5,7 +5,12 @@ import android.content.Context
 class SongRepository(context: Context) {
     private val dao = AppDatabase.get(context).songDao()
 
-    suspend fun recordPlay(videoId: String, title: String, artist: String) {
+    suspend fun recordPlay(
+        videoId: String,
+        title: String,
+        artist: String,
+        album: String? = null
+    ) {
         val existing = dao.getById(videoId)
         val now = System.currentTimeMillis()
         dao.upsert(
@@ -13,6 +18,7 @@ class SongRepository(context: Context) {
                 videoId = videoId,
                 title = title,
                 artist = artist,
+                album = album,
                 lastPlayedAt = now,
                 playCount = (existing?.playCount ?: 0) + 1,
                 isFavorite = existing?.isFavorite ?: false,

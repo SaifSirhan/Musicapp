@@ -8,6 +8,7 @@ data class Song(
     @PrimaryKey val videoId: String,
     val title: String,
     val artist: String,
+    val album: String? = null,
     val lastPlayedAt: Long,
     val playCount: Int,
     val isFavorite: Boolean = false,

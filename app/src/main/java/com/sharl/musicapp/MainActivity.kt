@@ -205,7 +205,7 @@ fun PlayerScreen(
                     return@launch
                 }
                 val (url, meta) = result
-                repo.recordPlay(item.videoId, item.title, "YouTube")
+                repo.recordPlay(item.videoId, meta.title, meta.artist, meta.album)
                 controller!!.setMediaItem(
                     MediaItem.Builder()
                         .setUri(url)
@@ -756,9 +756,16 @@ fun SongRow(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
-            val playLabel = if (song.playCount == 1) "play" else "plays"
+            val subtitle = buildString {
+                append(song.artist)
+                song.album?.let { append(" · $it") }
+                append(" · ")
+                append(song.playCount)
+                append(" ")
+                append(if (song.playCount == 1) "play" else "plays")
+            }
             Text(
-                text = "${song.artist} · ${song.playCount} $playLabel",
+                text = subtitle,
                 style = androidx.compose.material3.MaterialTheme.typography.bodySmall
             )
         }
