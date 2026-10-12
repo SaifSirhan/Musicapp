@@ -24,7 +24,12 @@ class SongRepository(context: Context) {
     fun recentlyPlayed() = dao.recentlyPlayed()
 
     suspend fun toggleFavorite(song: Song) {
-        dao.setFavorite(song.videoId, !song.isFavorite)
+        val existing = dao.getById(song.videoId)
+        if (existing == null) {
+            dao.upsert(song.copy(isFavorite = !song.isFavorite))
+        } else {
+            dao.setFavorite(song.videoId, !existing.isFavorite)
+        }
     }
 
     suspend fun hide(song: Song) {

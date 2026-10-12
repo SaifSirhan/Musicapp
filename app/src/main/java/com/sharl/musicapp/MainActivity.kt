@@ -127,7 +127,7 @@ fun PlayerScreen(
     var isShuffled by remember { mutableStateOf(false) }
     var repeatMode by remember { mutableStateOf(0) }  // 0=off, 1=all, 2=one
 
-    val urlCache = remember { mutableStateMapOf<String, String>() }
+    val urlCache = remember { mutableStateMapOf<String, Pair<String, SongMetadata>>() }
     var pendingExtraction by remember { mutableStateOf<String?>(null) }
 
     DisposableEffect(context) {
@@ -179,12 +179,12 @@ fun PlayerScreen(
         }
     }
 
-    suspend fun extractOrCache(videoId: String): String? {
+    suspend fun extractOrCache(videoId: String): Pair<String, SongMetadata>? {
         urlCache[videoId]?.let {
             urlCache.remove(videoId)
             return it
         }
-        return YtdlpHelper.extractAudioUrlForId(context, videoId)
+        return YtdlpHelper.extractUrlAndMetadata(context, videoId)
     }
 
     fun playFromQueue(items: List<QueueItem>, index: Int) {
@@ -196,24 +196,24 @@ fun PlayerScreen(
         queue = items
         queueIndex = index
         val item = items[index]
-        nowPlayingTitle = item.title
-        nowPlayingArtist = "YouTube"
         status = "Extracting..."
         scope.launch {
             try {
-                val url = extractOrCache(item.videoId)
-                if (url == null) {
+                val result = extractOrCache(item.videoId)
+                if (result == null) {
                     status = "Error: extraction returned null"
                     return@launch
                 }
+                val (url, meta) = result
                 repo.recordPlay(item.videoId, item.title, "YouTube")
                 controller!!.setMediaItem(
                     MediaItem.Builder()
                         .setUri(url)
                         .setMediaMetadata(
                             androidx.media3.common.MediaMetadata.Builder()
-                                .setTitle(item.title)
-                                .setArtist("YouTube")
+                                .setTitle(meta.title)
+                                .setArtist(meta.artist)
+                                .setAlbumTitle(meta.album)
                                 .build()
                         )
                         .build()
@@ -221,7 +221,9 @@ fun PlayerScreen(
                 controller!!.prepare()
                 controller!!.play()
                 isPlaying = true
-                status = "Playing: ${item.title}"
+                nowPlayingTitle = meta.title
+                nowPlayingArtist = meta.artist
+                status = "Playing: ${meta.title}"
 
                 val nextIndex = index + 1
                 if (nextIndex in items.indices) {
@@ -230,9 +232,9 @@ fun PlayerScreen(
                         pendingExtraction = nextId
                         scope.launch {
                             try {
-                                val preUrl = YtdlpHelper.extractAudioUrlForId(context, nextId)
-                                if (preUrl != null) {
-                                    urlCache[nextId] = preUrl
+                                val pre = YtdlpHelper.extractUrlAndMetadata(context, nextId)
+                                if (pre != null) {
+                                    urlCache[nextId] = pre
                                     Log.d("PRECACHE", "cached: $nextId")
                                 }
                             } catch (e: Exception) {

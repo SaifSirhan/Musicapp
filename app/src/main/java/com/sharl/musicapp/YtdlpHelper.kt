@@ -14,6 +14,12 @@ data class SearchResult(
     val url: String
 )
 
+data class SongMetadata(
+    val title: String,
+    val artist: String,
+    val album: String?
+)
+
 object YtdlpHelper {
 
     @Volatile
@@ -122,4 +128,62 @@ object YtdlpHelper {
 
     suspend fun extractAudioUrlForId(context: Context, videoId: String): String? =
         extractAudioUrl(context, "https://www.youtube.com/watch?v=$videoId")
+
+    suspend fun extractUrlAndMetadata(
+        context: Context,
+        videoId: String
+    ): Pair<String, SongMetadata>? = withContext(Dispatchers.IO) {
+        ensureInitialized(context)
+        val videoUrl = "https://www.youtube.com/watch?v=$videoId"
+
+        val request = YoutubeDLRequest(videoUrl).apply {
+            addOption("-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best")
+            addOption("--skip-download")
+            addOption("--print",
+                "%(url)s|%(artist)s|%(album)s|%(uploader)s|%(track)s|%(title)s")
+            addOption("--extractor-args",
+                "youtube:player_client=ios,tv,mweb,android_vr,web_embedded,tv_embedded")
+            addOption("--remote-components", "ejs:github")
+            addOption("--no-update")
+            addOption("--no-warnings")
+        }
+
+        try {
+            val response = YoutubeDL.getInstance().execute(request)
+            val line = response.out.lineSequence()
+                .firstOrNull { it.isNotBlank() && it.contains("|") }
+                ?: return@withContext null
+
+            val parts = line.split("|", limit = 6)
+            if (parts.size < 6) {
+                Log.e("YTDL", "metadata parse failed: $line")
+                return@withContext null
+            }
+
+            val url = parts[0].trim()
+            val rawArtist = parts[1].trim()
+            val rawAlbum = parts[2].trim()
+            val rawUploader = parts[3].trim()
+            val rawTrack = parts[4].trim()
+            val rawTitle = parts[5].trim()
+
+            fun clean(v: String): String? =
+                v.takeIf { it.isNotEmpty() && it != "NA" && it != "null" }
+
+            // Artist priority: artist field > uploader (with " - Topic" stripped) > fallback
+            val artist = clean(rawArtist)
+                ?: clean(rawUploader)?.removeSuffix(" - Topic")?.trim()
+                ?: "Unknown Artist"
+
+            // Title priority: track field > title field
+            val title = clean(rawTrack) ?: clean(rawTitle) ?: "Unknown Title"
+
+            val album = clean(rawAlbum)
+
+            url to SongMetadata(title = title, artist = artist, album = album)
+        } catch (e: Exception) {
+            Log.e("YTDL", "extractUrlAndMetadata failed: ${e.message}", e)
+            null
+        }
+    }
 }
