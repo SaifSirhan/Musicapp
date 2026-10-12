@@ -28,4 +28,19 @@ interface SongDao {
 
     @Query("SELECT * FROM songs WHERE isFavorite = 1 AND isHidden = 0 ORDER BY lastPlayedAt DESC")
     fun favorites(): Flow<List<Song>>
+
+    @Query("SELECT * FROM songs WHERE isHidden = 0 AND lastPlayedAt > 0 ORDER BY lastPlayedAt DESC LIMIT :limit")
+    fun recentSongs(limit: Int): Flow<List<Song>>
+
+    @Query("SELECT * FROM songs WHERE isHidden = 0 AND playCount > 0 ORDER BY playCount DESC LIMIT :limit")
+    fun mostPlayed(limit: Int): Flow<List<Song>>
+
+    @Query("SELECT * FROM songs WHERE isHidden = 0 AND artist = :artist ORDER BY lastPlayedAt DESC LIMIT :limit")
+    fun songsByArtist(artist: String, limit: Int): Flow<List<Song>>
+
+    @Query("SELECT * FROM songs WHERE isHidden = 0 AND isFavorite = 1 ORDER BY lastPlayedAt DESC LIMIT :limit")
+    fun favoriteSongs(limit: Int): Flow<List<Song>>
+
+    @Query("SELECT artist FROM songs WHERE isHidden = 0 AND playCount > 0 GROUP BY artist ORDER BY SUM(playCount) DESC LIMIT 1")
+    fun topArtist(): Flow<String?>
 }

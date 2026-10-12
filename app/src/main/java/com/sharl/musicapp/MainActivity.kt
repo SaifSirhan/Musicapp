@@ -25,7 +25,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
@@ -106,7 +109,14 @@ fun PlayerScreen(
     val repo = remember { SongRepository(context) }
     val recent by repo.recentlyPlayed().collectAsState(initial = emptyList())
     val favorites by repo.favorites().collectAsState(initial = emptyList())
-    var tab by remember { mutableStateOf(0) }  // 0 = Home, 1 = Search, 2 = Favorites
+    val forYouRecent by repo.recentSongs(10).collectAsState(initial = emptyList())
+    val forYouTop by repo.mostPlayed(10).collectAsState(initial = emptyList())
+    val forYouFavorites by repo.favoriteSongs(10).collectAsState(initial = emptyList())
+    val topArtistName by repo.topArtist().collectAsState(initial = null)
+    val forYouByArtist by (topArtistName?.let {
+        repo.songsByArtist(it, 10)
+    } ?: kotlinx.coroutines.flow.flowOf(emptyList())).collectAsState(initial = emptyList())
+    var tab by remember { mutableStateOf(0) }  // 0 = Home, 1 = For You, 2 = Search, 3 = Favorites
     var showColorPicker by remember { mutableStateOf(false) }
     var menuSong by remember { mutableStateOf<Song?>(null) }
 
@@ -347,11 +357,16 @@ fun PlayerScreen(
             androidx.compose.material3.Tab(
                 selected = tab == 1,
                 onClick = { tab = 1 },
-                text = { Text("Search") }
+                text = { Text("For You") }
             )
             androidx.compose.material3.Tab(
                 selected = tab == 2,
                 onClick = { tab = 2 },
+                text = { Text("Search") }
+            )
+            androidx.compose.material3.Tab(
+                selected = tab == 3,
+                onClick = { tab = 3 },
                 text = { Text("Favorites") }
             )
         }
@@ -385,6 +400,74 @@ fun PlayerScreen(
                 }
             }
             1 -> {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(top = 8.dp)
+                ) {
+                    item {
+                        RecommendationRow(
+                            title = "Recently Played",
+                            songs = forYouRecent,
+                            onSongClick = { song ->
+                                playFromQueue(
+                                    forYouRecent.map { QueueItem(it.videoId, it.title) },
+                                    forYouRecent.indexOf(song)
+                                )
+                            }
+                        )
+                    }
+                    item {
+                        RecommendationRow(
+                            title = "Most Played",
+                            songs = forYouTop,
+                            onSongClick = { song ->
+                                playFromQueue(
+                                    forYouTop.map { QueueItem(it.videoId, it.title) },
+                                    forYouTop.indexOf(song)
+                                )
+                            }
+                        )
+                    }
+                    item {
+                        if (topArtistName != null) {
+                            RecommendationRow(
+                                title = "More from $topArtistName",
+                                songs = forYouByArtist,
+                                onSongClick = { song ->
+                                    playFromQueue(
+                                        forYouByArtist.map { QueueItem(it.videoId, it.title) },
+                                        forYouByArtist.indexOf(song)
+                                    )
+                                }
+                            )
+                        }
+                    }
+                    item {
+                        RecommendationRow(
+                            title = "Your Favorites",
+                            songs = forYouFavorites,
+                            onSongClick = { song ->
+                                playFromQueue(
+                                    forYouFavorites.map { QueueItem(it.videoId, it.title) },
+                                    forYouFavorites.indexOf(song)
+                                )
+                            }
+                        )
+                    }
+                    if (forYouRecent.isEmpty() && forYouTop.isEmpty() && forYouFavorites.isEmpty()) {
+                        item {
+                            Text(
+                                text = "Play some songs and they'll show up here.",
+                                modifier = Modifier.padding(16.dp),
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+            2 -> {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -457,7 +540,7 @@ fun PlayerScreen(
                     }
                 }
             }
-            2 -> {
+            3 -> {
                 if (favorites.isEmpty()) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
@@ -730,6 +813,50 @@ fun MenuItem(label: String, onClick: () -> Unit) {
                 .padding(start = 4.dp),
             textAlign = androidx.compose.ui.text.style.TextAlign.Start
         )
+    }
+}
+
+@Composable
+fun RecommendationRow(
+    title: String,
+    songs: List<Song>,
+    onSongClick: (Song) -> Unit
+) {
+    if (songs.isEmpty()) return
+
+    Column(modifier = Modifier
+        .fillMaxWidth()
+        .padding(vertical = 8.dp)
+    ) {
+        Text(
+            text = title,
+            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
+        )
+        androidx.compose.foundation.lazy.LazyRow {
+            items(songs, key = { it.videoId }) { song ->
+                Column(
+                    modifier = Modifier
+                        .width(140.dp)
+                        .padding(horizontal = 4.dp)
+                        .clickable { onSongClick(song) }
+                ) {
+                    Text(
+                        text = song.title,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = song.artist,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
     }
 }
 

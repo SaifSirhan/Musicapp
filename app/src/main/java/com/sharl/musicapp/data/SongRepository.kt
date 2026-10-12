@@ -43,4 +43,10 @@ class SongRepository(context: Context) {
     }
 
     fun favorites() = dao.favorites()
+
+    fun recentSongs(limit: Int = 20) = dao.recentSongs(limit)
+    fun mostPlayed(limit: Int = 20) = dao.mostPlayed(limit)
+    fun songsByArtist(artist: String, limit: Int = 20) = dao.songsByArtist(artist, limit)
+    fun favoriteSongs(limit: Int = 20) = dao.favoriteSongs(limit)
+    fun topArtist() = dao.topArtist()
 }
