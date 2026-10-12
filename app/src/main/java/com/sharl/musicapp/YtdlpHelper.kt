@@ -17,7 +17,8 @@ data class SearchResult(
 data class SongMetadata(
     val title: String,
     val artist: String,
-    val album: String?
+    val album: String?,
+    val thumbnailUrl: String?
 )
 
 object YtdlpHelper {
@@ -140,7 +141,7 @@ object YtdlpHelper {
             addOption("-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best")
             addOption("--skip-download")
             addOption("--print",
-                "%(url)s|%(artist)s|%(album)s|%(uploader)s|%(track)s|%(title)s")
+                "%(url)s|%(artist)s|%(album)s|%(uploader)s|%(track)s|%(title)s|%(thumbnail)s")
             addOption("--extractor-args",
                 "youtube:player_client=ios,tv,mweb,android_vr,web_embedded,tv_embedded")
             addOption("--remote-components", "ejs:github")
@@ -154,7 +155,7 @@ object YtdlpHelper {
                 .firstOrNull { it.isNotBlank() && it.contains("|") }
                 ?: return@withContext null
 
-            val parts = line.split("|", limit = 6)
+            val parts = line.split("|", limit = 7)
             if (parts.size < 6) {
                 Log.e("YTDL", "metadata parse failed: $line")
                 return@withContext null
@@ -166,6 +167,7 @@ object YtdlpHelper {
             val rawUploader = parts[3].trim()
             val rawTrack = parts[4].trim()
             val rawTitle = parts[5].trim()
+            val rawThumbnail = parts.getOrNull(6)?.trim()
 
             fun clean(v: String): String? =
                 v.takeIf { it.isNotEmpty() && it != "NA" && it != "null" }
@@ -179,10 +181,47 @@ object YtdlpHelper {
             val title = clean(rawTrack) ?: clean(rawTitle) ?: "Unknown Title"
 
             val album = clean(rawAlbum)
+            val thumbnailUrl = rawThumbnail?.let { clean(it) }
 
-            url to SongMetadata(title = title, artist = artist, album = album)
+            url to SongMetadata(
+                title = title,
+                artist = artist,
+                album = album,
+                thumbnailUrl = thumbnailUrl
+            )
         } catch (e: Exception) {
             Log.e("YTDL", "extractUrlAndMetadata failed: ${e.message}", e)
+            null
+        }
+    }
+
+    suspend fun extractVideoUrl(
+        context: Context,
+        videoId: String,
+        maxHeight: Int = 720
+    ): String? = withContext(Dispatchers.IO) {
+        ensureInitialized(context)
+        val url = "https://www.youtube.com/watch?v=$videoId"
+        val request = YoutubeDLRequest(url).apply {
+            // Single progressive file only — a separate video+audio split would
+            // need a Muxer to merge, which ExoPlayer can't do here.
+            addOption("-f", "best[height<=$maxHeight][ext=mp4]/best[height<=$maxHeight]/best")
+            addOption("-g")
+            addOption("--extractor-args",
+                "youtube:player_client=ios,tv,mweb,android_vr,web_embedded,tv_embedded")
+            addOption("--remote-components", "ejs:github")
+            addOption("--no-update")
+            addOption("--no-warnings")
+        }
+        try {
+            val response = YoutubeDL.getInstance().execute(request)
+            response.out.lineSequence().map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .toList()
+                .takeIf { it.isNotEmpty() }
+                ?.joinToString("\n")
+        } catch (e: Exception) {
+            Log.e("YTDL", "extractVideoUrl failed: ${e.message}", e)
             null
         }
     }

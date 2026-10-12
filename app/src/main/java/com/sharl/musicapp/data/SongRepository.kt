@@ -9,7 +9,8 @@ class SongRepository(context: Context) {
         videoId: String,
         title: String,
         artist: String,
-        album: String? = null
+        album: String? = null,
+        thumbnailUrl: String? = null
     ) {
         val existing = dao.getById(videoId)
         val now = System.currentTimeMillis()
@@ -19,6 +20,7 @@ class SongRepository(context: Context) {
                 title = title,
                 artist = artist,
                 album = album,
+                thumbnailUrl = thumbnailUrl,
                 lastPlayedAt = now,
                 playCount = (existing?.playCount ?: 0) + 1,
                 isFavorite = existing?.isFavorite ?: false,

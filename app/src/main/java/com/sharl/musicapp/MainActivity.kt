@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -131,11 +132,23 @@ fun PlayerScreen(
     var queueIndex by remember { mutableStateOf(-1) }
     var nowPlayingTitle by remember { mutableStateOf<String?>(null) }
     var nowPlayingArtist by remember { mutableStateOf<String?>(null) }
+    var nowPlayingThumbnail by remember { mutableStateOf<String?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
 
     var showNowPlaying by remember { mutableStateOf(false) }
     var isShuffled by remember { mutableStateOf(false) }
     var repeatMode by remember { mutableStateOf(0) }  // 0=off, 1=all, 2=one
+
+    var lyrics by remember { mutableStateOf<List<LyricLine>>(emptyList()) }
+    var lyricsLoading by remember { mutableStateOf(false) }
+    var lyricsTab by remember { mutableStateOf(0) }  // inside Now Playing: 0 = Art, 1 = Lyrics
+    var currentPosMs by remember { mutableStateOf(0L) }
+
+    var currentDurationMs by remember { mutableStateOf(0L) }
+    var isScrubbing by remember { mutableStateOf(false) }
+    var scrubPositionMs by remember { mutableStateOf(0L) }
+    var isVideoMode by remember { mutableStateOf(false) }
+    var videoModeLoading by remember { mutableStateOf(false) }
 
     val urlCache = remember { mutableStateMapOf<String, Pair<String, SongMetadata>>() }
     var pendingExtraction by remember { mutableStateOf<String?>(null) }
@@ -189,6 +202,17 @@ fun PlayerScreen(
         }
     }
 
+    LaunchedEffect(showNowPlaying, nowPlayingTitle) {
+        while (showNowPlaying && nowPlayingTitle != null) {
+            controller?.let { c ->
+                if (!isScrubbing) currentPosMs = c.currentPosition
+                val d = c.duration
+                currentDurationMs = if (d > 0) d else 0L
+            }
+            kotlinx.coroutines.delay(250)
+        }
+    }
+
     suspend fun extractOrCache(videoId: String): Pair<String, SongMetadata>? {
         urlCache[videoId]?.let {
             urlCache.remove(videoId)
@@ -215,7 +239,7 @@ fun PlayerScreen(
                     return@launch
                 }
                 val (url, meta) = result
-                repo.recordPlay(item.videoId, meta.title, meta.artist, meta.album)
+                repo.recordPlay(item.videoId, meta.title, meta.artist, meta.album, meta.thumbnailUrl)
                 controller!!.setMediaItem(
                     MediaItem.Builder()
                         .setUri(url)
@@ -224,6 +248,7 @@ fun PlayerScreen(
                                 .setTitle(meta.title)
                                 .setArtist(meta.artist)
                                 .setAlbumTitle(meta.album)
+                                .setArtworkUri(meta.thumbnailUrl?.let { android.net.Uri.parse(it) })
                                 .build()
                         )
                         .build()
@@ -233,7 +258,23 @@ fun PlayerScreen(
                 isPlaying = true
                 nowPlayingTitle = meta.title
                 nowPlayingArtist = meta.artist
+                nowPlayingThumbnail = meta.thumbnailUrl
                 status = "Playing: ${meta.title}"
+
+                lyrics = emptyList()
+                lyricsLoading = true
+                lyricsTab = 0
+                isVideoMode = false
+                val fetchTitle = meta.title
+                val fetchArtist = meta.artist
+                scope.launch {
+                    val result = LyricsHelper.fetch(fetchArtist, fetchTitle)
+                    // Only apply if still the same track
+                    if (nowPlayingTitle == fetchTitle) {
+                        lyrics = result ?: emptyList()
+                        lyricsLoading = false
+                    }
+                }
 
                 val nextIndex = index + 1
                 if (nextIndex in items.indices) {
@@ -297,6 +338,59 @@ fun PlayerScreen(
         status = "Playing next: ${song.title}"
     }
 
+    fun toggleVideoMode() {
+        val c = controller ?: return
+        if (queueIndex < 0) return
+        val item = queue[queueIndex]
+        val wasPlaying = c.isPlaying
+        val pos = c.currentPosition
+        val newMode = !isVideoMode
+        videoModeLoading = true
+        scope.launch {
+            try {
+                val meta = urlCache[item.videoId]?.second
+                    ?: YtdlpHelper.extractUrlAndMetadata(context, item.videoId)?.second
+
+                val url = if (newMode) {
+                    YtdlpHelper.extractVideoUrl(context, item.videoId)
+                } else {
+                    urlCache[item.videoId]?.first
+                        ?: YtdlpHelper.extractUrlAndMetadata(context, item.videoId)?.first
+                }
+                if (url == null) {
+                    status = "Toggle failed: extraction returned null"
+                    return@launch
+                }
+
+                val builder = androidx.media3.common.MediaItem.Builder().setUri(url)
+                if (meta != null) {
+                    builder.setMediaMetadata(
+                        androidx.media3.common.MediaMetadata.Builder()
+                            .setTitle(meta.title)
+                            .setArtist(meta.artist)
+                            .setAlbumTitle(meta.album)
+                            .apply {
+                                meta.thumbnailUrl?.let {
+                                    setArtworkUri(android.net.Uri.parse(it))
+                                }
+                            }
+                            .build()
+                    )
+                }
+                c.setMediaItem(builder.build())
+                c.prepare()
+                c.seekTo(pos)
+                if (wasPlaying) c.play()
+                isVideoMode = newMode
+                status = if (newMode) "Video mode" else "Audio mode"
+            } catch (e: Exception) {
+                status = "Toggle failed: ${e.message}"
+            } finally {
+                videoModeLoading = false
+            }
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -309,9 +403,29 @@ fun PlayerScreen(
             NowPlayingScreen(
                 title = nowPlayingTitle ?: "",
                 artist = nowPlayingArtist ?: "",
+                thumbnailUrl = nowPlayingThumbnail,
                 isPlaying = isPlaying,
                 isShuffled = isShuffled,
                 repeatMode = repeatMode,
+                lyrics = lyrics,
+                lyricsLoading = lyricsLoading,
+                currentPosMs = currentPosMs,
+                currentDurationMs = currentDurationMs,
+                isScrubbing = isScrubbing,
+                scrubPositionMs = scrubPositionMs,
+                onScrubStart = { isScrubbing = true; scrubPositionMs = currentPosMs },
+                onScrubChange = { scrubPositionMs = it },
+                onScrubEnd = {
+                    controller?.seekTo(scrubPositionMs)
+                    currentPosMs = scrubPositionMs
+                    isScrubbing = false
+                },
+                isVideoMode = isVideoMode,
+                videoModeLoading = videoModeLoading,
+                onToggleVideoMode = { toggleVideoMode() },
+                mediaController = controller,
+                lyricsTab = lyricsTab,
+                onLyricsTabChange = { lyricsTab = it },
                 onBack = { showNowPlaying = false },
                 onPlayPause = {
                     val c = controller ?: return@NowPlayingScreen
@@ -673,6 +787,8 @@ fun PlayerScreen(
                     .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Thumbnail(nowPlayingThumbnail, 40.dp)
+                Spacer(Modifier.width(8.dp))
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -841,6 +957,7 @@ fun RecommendationRow(
                         .padding(horizontal = 4.dp)
                         .clickable { onSongClick(song) }
                 ) {
+                    Thumbnail(song.thumbnailUrl, size = 132.dp)
                     Text(
                         text = song.title,
                         maxLines = 2,
@@ -861,6 +978,26 @@ fun RecommendationRow(
 }
 
 @Composable
+fun Thumbnail(url: String?, size: androidx.compose.ui.unit.Dp) {
+    if (url == null) {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .background(androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant)
+        )
+        return
+    }
+    coil.compose.AsyncImage(
+        model = url,
+        contentDescription = null,
+        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+        modifier = Modifier
+            .size(size)
+            .background(androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant)
+    )
+}
+
+@Composable
 fun SongRow(
     song: Song,
     onClick: () -> Unit,
@@ -877,6 +1014,8 @@ fun SongRow(
             .padding(vertical = 12.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        Thumbnail(song.thumbnailUrl, 48.dp)
+        Spacer(Modifier.width(8.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = song.title,
@@ -906,13 +1045,34 @@ fun SongRow(
     HorizontalDivider()
 }
 
+fun formatTime(ms: Long): String {
+    val s = (ms / 1000).coerceAtLeast(0L)
+    return "%d:%02d".format(s / 60, s % 60)
+}
+
 @Composable
 fun NowPlayingScreen(
     title: String,
     artist: String,
+    thumbnailUrl: String?,
     isPlaying: Boolean,
     isShuffled: Boolean,
     repeatMode: Int,
+    lyrics: List<LyricLine>,
+    lyricsLoading: Boolean,
+    currentPosMs: Long,
+    currentDurationMs: Long,
+    isScrubbing: Boolean,
+    scrubPositionMs: Long,
+    onScrubStart: () -> Unit,
+    onScrubChange: (Long) -> Unit,
+    onScrubEnd: () -> Unit,
+    isVideoMode: Boolean,
+    videoModeLoading: Boolean,
+    onToggleVideoMode: () -> Unit,
+    mediaController: MediaController?,
+    lyricsTab: Int,
+    onLyricsTabChange: (Int) -> Unit,
     onBack: () -> Unit,
     onPlayPause: () -> Unit,
     onPrev: () -> Unit,
@@ -931,66 +1091,241 @@ fun NowPlayingScreen(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            androidx.compose.material3.IconButton(onClick = onBack) {
-                Text(
-                    "←",
-                    style = androidx.compose.material3.MaterialTheme.typography.headlineMedium
-                )
+            Box(
+                modifier = Modifier.size(48.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.material3.IconButton(onClick = onBack) {
+                    Text(
+                        "←",
+                        style = androidx.compose.material3.MaterialTheme.typography.headlineMedium
+                    )
+                }
             }
         }
 
-        Spacer(modifier = Modifier.weight(0.6f))
+        androidx.compose.material3.TabRow(selectedTabIndex = lyricsTab) {
+            androidx.compose.material3.Tab(
+                selected = lyricsTab == 0,
+                onClick = { onLyricsTabChange(0) },
+                text = { Text("Art") }
+            )
+            androidx.compose.material3.Tab(
+                selected = lyricsTab == 1,
+                onClick = { onLyricsTabChange(1) },
+                text = { Text("Lyrics") }
+            )
+        }
 
-        // Title and artist, centered
-        Text(
-            text = title,
-            style = androidx.compose.material3.MaterialTheme.typography.headlineMedium,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(modifier = Modifier.size(8.dp))
-        Text(
-            text = artist,
-            style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
-            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
+        when (lyricsTab) {
+            0 -> {
+                Spacer(modifier = Modifier.weight(0.6f))
 
-        Spacer(modifier = Modifier.weight(0.4f))
+                // Artwork (or video), centered
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isVideoMode) {
+                        androidx.compose.ui.viewinterop.AndroidView(
+                            factory = { ctx ->
+                                androidx.media3.ui.PlayerView(ctx).apply {
+                                    useController = false
+                                    player = mediaController
+                                }
+                            },
+                            update = { view ->
+                                (view as androidx.media3.ui.PlayerView).player = mediaController
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(16f / 9f)
+                        )
+                    } else {
+                        Thumbnail(thumbnailUrl, 280.dp)
+                    }
+                }
+                Spacer(modifier = Modifier.size(16.dp))
+
+                // Title and artist, centered
+                Text(
+                    text = title,
+                    style = androidx.compose.material3.MaterialTheme.typography.headlineMedium,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.size(8.dp))
+                Text(
+                    text = artist,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.weight(0.4f))
+
+                // Video/audio toggle
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier.size(56.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        androidx.compose.material3.IconButton(
+                            onClick = { onToggleVideoMode() },
+                            enabled = !videoModeLoading
+                        ) {
+                            Text(
+                                if (isVideoMode) "🎬" else "🎵",
+                                style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                                color = if (isVideoMode)
+                                    androidx.compose.material3.MaterialTheme.colorScheme.primary
+                                else
+                                    androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (videoModeLoading) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+            else -> {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    when {
+                        lyricsLoading -> {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                modifier = Modifier.align(Alignment.CenterHorizontally)
+                            )
+                        }
+                        lyrics.isEmpty() -> {
+                            Text(
+                                "No lyrics available.",
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        else -> {
+                            val currentIndex = lyrics.indexOfLast { it.startMs <= currentPosMs }
+                            val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+                            androidx.compose.runtime.LaunchedEffect(currentIndex) {
+                                if (currentIndex >= 0) listState.animateScrollToItem(currentIndex)
+                            }
+                            androidx.compose.foundation.lazy.LazyColumn(
+                                state = listState,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f)
+                            ) {
+                                itemsIndexed(lyrics) { idx, line ->
+                                    val active = idx == currentIndex
+                                    Text(
+                                        text = line.text,
+                                        color = if (active)
+                                            androidx.compose.material3.MaterialTheme.colorScheme.primary
+                                        else
+                                            androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                                        style = if (active)
+                                            androidx.compose.material3.MaterialTheme.typography.titleMedium
+                                        else
+                                            androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 6.dp, horizontal = 16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Progress bar + time labels (visible in both tabs)
+        val displayPos = if (isScrubbing) scrubPositionMs else currentPosMs
+        val maxVal = currentDurationMs.coerceAtLeast(1L).toFloat()
+        androidx.compose.material3.Slider(
+            value = displayPos.coerceIn(0L, currentDurationMs.coerceAtLeast(0L)).toFloat(),
+            onValueChange = { v -> if (!isScrubbing) onScrubStart(); onScrubChange(v.toLong()) },
+            onValueChangeFinished = { onScrubEnd() },
+            valueRange = 0f..maxVal,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+        ) {
+            Text(
+                formatTime(displayPos),
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            Text(
+                formatTime(currentDurationMs),
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
 
         // Shuffle + repeat row
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 64.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            androidx.compose.material3.IconButton(onClick = onShuffleToggle) {
-                Text(
-                    "🔀",
-                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
-                    color = if (isShuffled)
-                        androidx.compose.material3.MaterialTheme.colorScheme.primary
-                    else
-                        androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            androidx.compose.material3.IconButton(onClick = onRepeatToggle) {
-                val glyph = when (repeatMode) {
-                    1 -> "🔁"
-                    2 -> "🔂"
-                    else -> "🔁"
+            Box(
+                modifier = Modifier.size(56.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.material3.IconButton(onClick = onShuffleToggle) {
+                    Text(
+                        "🔀",
+                        style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                        color = if (isShuffled)
+                            androidx.compose.material3.MaterialTheme.colorScheme.primary
+                        else
+                            androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-                Text(
-                    glyph,
-                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
-                    color = if (repeatMode == 0)
-                        androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
-                    else
-                        androidx.compose.material3.MaterialTheme.colorScheme.primary
-                )
+            }
+            Box(
+                modifier = Modifier.size(56.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.material3.IconButton(onClick = onRepeatToggle) {
+                    val glyph = when (repeatMode) {
+                        1 -> "🔁"
+                        2 -> "🔂"
+                        else -> "🔁"
+                    }
+                    Text(
+                        glyph,
+                        style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                        color = if (repeatMode == 0)
+                            androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        else
+                            androidx.compose.material3.MaterialTheme.colorScheme.primary
+                    )
+                }
             }
         }
 
@@ -1002,24 +1337,39 @@ fun NowPlayingScreen(
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            androidx.compose.material3.IconButton(onClick = onPrev) {
-                Text(
-                    "⏮",
-                    style = androidx.compose.material3.MaterialTheme.typography.displaySmall
-                )
+            Box(
+                modifier = Modifier.size(72.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.material3.IconButton(onClick = onPrev) {
+                    Text(
+                        "⏮",
+                        style = androidx.compose.material3.MaterialTheme.typography.displaySmall
+                    )
+                }
             }
-            androidx.compose.material3.IconButton(onClick = onPlayPause) {
-                Text(
-                    if (isPlaying) "⏸" else "▶",
-                    style = androidx.compose.material3.MaterialTheme.typography.displayMedium,
-                    color = androidx.compose.material3.MaterialTheme.colorScheme.primary
-                )
+            Box(
+                modifier = Modifier.size(72.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.material3.IconButton(onClick = onPlayPause) {
+                    Text(
+                        if (isPlaying) "⏸" else "▶",
+                        style = androidx.compose.material3.MaterialTheme.typography.displayMedium,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+                    )
+                }
             }
-            androidx.compose.material3.IconButton(onClick = onNext) {
-                Text(
-                    "⏭",
-                    style = androidx.compose.material3.MaterialTheme.typography.displaySmall
-                )
+            Box(
+                modifier = Modifier.size(72.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.material3.IconButton(onClick = onNext) {
+                    Text(
+                        "⏭",
+                        style = androidx.compose.material3.MaterialTheme.typography.displaySmall
+                    )
+                }
             }
         }
 
