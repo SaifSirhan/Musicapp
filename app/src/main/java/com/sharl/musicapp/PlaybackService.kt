@@ -41,6 +41,15 @@ class PlaybackService : MediaSessionService() {
             override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
                 Log.d("ISLAND", "title=${mediaMetadata.title} artist=${mediaMetadata.artist}")
             }
+
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_ENDED) {
+                    // Signal the UI to advance the in-memory queue. The service
+                    // can't call MainActivity's playNext directly, so it goes
+                    // through a shared in-process singleton.
+                    QueueAdvanceSignaler.notifyTrackEnded()
+                }
+            }
         })
 
         mediaSession = MediaSession.Builder(this, player).build()

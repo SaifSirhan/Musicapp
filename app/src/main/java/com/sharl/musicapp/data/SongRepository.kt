@@ -51,4 +51,5 @@ class SongRepository(context: Context) {
     fun songsByArtist(artist: String, limit: Int = 20) = dao.songsByArtist(artist, limit)
     fun favoriteSongs(limit: Int = 20) = dao.favoriteSongs(limit)
     fun topArtist() = dao.topArtist()
+    suspend fun searchLocal(q: String) = dao.searchLocal(q)
 }

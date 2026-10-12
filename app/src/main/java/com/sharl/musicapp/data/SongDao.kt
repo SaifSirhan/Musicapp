@@ -43,4 +43,13 @@ interface SongDao {
 
     @Query("SELECT artist FROM songs WHERE isHidden = 0 AND playCount > 0 GROUP BY artist ORDER BY SUM(playCount) DESC LIMIT 1")
     fun topArtist(): Flow<String?>
+
+    @Query("""
+        SELECT * FROM songs
+        WHERE title LIKE '%' || :q || '%'
+           OR artist LIKE '%' || :q || '%'
+        ORDER BY playCount DESC
+        LIMIT 10
+    """)
+    suspend fun searchLocal(q: String): List<Song>
 }

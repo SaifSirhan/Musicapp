@@ -25,14 +25,22 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -44,6 +52,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import kotlinx.coroutines.flow.first
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -57,14 +66,15 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.sharl.musicapp.data.Playlist
+import com.sharl.musicapp.data.PlaylistRepository
+import com.sharl.musicapp.data.PlaylistSong
 import com.sharl.musicapp.data.Song
 import com.sharl.musicapp.data.SongRepository
 import com.sharl.musicapp.ui.theme.AccentOptions
 import com.sharl.musicapp.ui.theme.DefaultAccent
 import com.sharl.musicapp.ui.theme.MusicAppTheme
 import kotlinx.coroutines.launch
-
-private const val TEST_VIDEO_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 data class QueueItem(val videoId: String, val title: String)
 
@@ -117,13 +127,16 @@ fun PlayerScreen(
     val forYouByArtist by (topArtistName?.let {
         repo.songsByArtist(it, 10)
     } ?: kotlinx.coroutines.flow.flowOf(emptyList())).collectAsState(initial = emptyList())
-    var tab by remember { mutableStateOf(0) }  // 0 = Home, 1 = For You, 2 = Search, 3 = Favorites
+    var tab by remember { mutableStateOf(0) }  // 0 = Home, 1 = Search, 2 = Library, 3 = For You
+    var libraryTab by remember { mutableStateOf(0) }  // 0 = Playlists, 1 = Favorites
     var showColorPicker by remember { mutableStateOf(false) }
     var menuSong by remember { mutableStateOf<Song?>(null) }
 
     var status by remember { mutableStateOf("Connecting...") }
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<SearchResult>>(emptyList()) }
+    var isSearching by remember { mutableStateOf(false) }
+    var localMatches by remember { mutableStateOf<List<Song>>(emptyList()) }
 
     var controller by remember { mutableStateOf<MediaController?>(null) }
     var connected by remember { mutableStateOf(false) }
@@ -141,7 +154,7 @@ fun PlayerScreen(
 
     var lyrics by remember { mutableStateOf<List<LyricLine>>(emptyList()) }
     var lyricsLoading by remember { mutableStateOf(false) }
-    var lyricsTab by remember { mutableStateOf(0) }  // inside Now Playing: 0 = Art, 1 = Lyrics
+    var nowPlayingTab by remember { mutableStateOf(0) }  // inside Now Playing: 0 = Art, 1 = Lyrics, 2 = Queue
     var currentPosMs by remember { mutableStateOf(0L) }
 
     var currentDurationMs by remember { mutableStateOf(0L) }
@@ -152,6 +165,19 @@ fun PlayerScreen(
 
     val urlCache = remember { mutableStateMapOf<String, Pair<String, SongMetadata>>() }
     var pendingExtraction by remember { mutableStateOf<String?>(null) }
+
+    val playlistRepo = remember { PlaylistRepository(context) }
+    val playlists by playlistRepo.all().collectAsState(initial = emptyList())
+    var showPlaylists by remember { mutableStateOf(false) }
+    var openPlaylistId by remember { mutableStateOf<Long?>(null) }
+    var showAddToPlaylist by remember { mutableStateOf<Song?>(null) }
+    var showNewPlaylistDialog by remember { mutableStateOf(false) }
+    var newPlaylistName by remember { mutableStateOf("") }
+    var showRenamePlaylist by remember { mutableStateOf(false) }
+    var renamePlaylistName by remember { mutableStateOf("") }
+    var showDeletePlaylistConfirm by remember { mutableStateOf(false) }
+    var playlistMenuSong by remember { mutableStateOf<PlaylistSong?>(null) }
+    var playlistMenuPlaylistId by remember { mutableStateOf<Long?>(null) }
 
     DisposableEffect(context) {
         Log.d("CTRL", "Connecting to PlaybackService...")
@@ -263,7 +289,6 @@ fun PlayerScreen(
 
                 lyrics = emptyList()
                 lyricsLoading = true
-                lyricsTab = 0
                 isVideoMode = false
                 val fetchTitle = meta.title
                 val fetchArtist = meta.artist
@@ -318,6 +343,15 @@ fun PlayerScreen(
             return
         }
         playFromQueue(queue, queueIndex - 1)
+    }
+
+    DisposableEffect(Unit) {
+        QueueAdvanceSignaler.setListener {
+            scope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                playNext()
+            }
+        }
+        onDispose { QueueAdvanceSignaler.setListener(null) }
     }
 
     fun appendToQueue(song: Song) {
@@ -396,7 +430,35 @@ fun PlayerScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        if (showNowPlaying && nowPlayingTitle != null) {
+        if (showPlaylists) {
+            androidx.activity.compose.BackHandler {
+                if (openPlaylistId != null) openPlaylistId = null else showPlaylists = false
+            }
+            PlaylistsScreen(
+                playlists = playlists,
+                openPlaylistId = openPlaylistId,
+                playlistRepo = playlistRepo,
+                onBack = {
+                    if (openPlaylistId != null) openPlaylistId = null else showPlaylists = false
+                },
+                onOpenPlaylist = { id -> openPlaylistId = id },
+                onPlayFromPlaylist = { songs, index ->
+                    playFromQueue(songs.map { QueueItem(it.videoId, it.title) }, index)
+                },
+                onCreatePlaylist = { showNewPlaylistDialog = true },
+                playlistName = playlists.firstOrNull { it.id == openPlaylistId }?.name ?: "",
+                playlistCreatedAt = playlists.firstOrNull { it.id == openPlaylistId }?.createdAt ?: 0L,
+                onRequestRename = {
+                    renamePlaylistName = playlists.firstOrNull { it.id == openPlaylistId }?.name ?: ""
+                    showRenamePlaylist = true
+                },
+                onRequestDelete = { showDeletePlaylistConfirm = true },
+                onSongMenu = { ps ->
+                    playlistMenuSong = ps
+                    playlistMenuPlaylistId = openPlaylistId
+                }
+            )
+        } else if (showNowPlaying && nowPlayingTitle != null) {
             androidx.activity.compose.BackHandler(enabled = true) {
                 showNowPlaying = false
             }
@@ -424,8 +486,11 @@ fun PlayerScreen(
                 videoModeLoading = videoModeLoading,
                 onToggleVideoMode = { toggleVideoMode() },
                 mediaController = controller,
-                lyricsTab = lyricsTab,
-                onLyricsTabChange = { lyricsTab = it },
+                nowPlayingTab = nowPlayingTab,
+                onNowPlayingTabChange = { nowPlayingTab = it },
+                queue = queue,
+                queueIndex = queueIndex,
+                onQueueItemClick = { idx -> playFromQueue(queue, idx) },
                 onBack = { showNowPlaying = false },
                 onPlayPause = {
                     val c = controller ?: return@NowPlayingScreen
@@ -454,66 +519,168 @@ fun PlayerScreen(
             )
         } else {
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            androidx.compose.material3.IconButton(onClick = { showColorPicker = true }) {
-                Text("⚙", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .background(
+                        androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                        androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                    )
+                    .clickable {
+                        tab = 0
+                        urlCache.clear()
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "♪",
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
+                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge
+                )
             }
-        }
+            Spacer(Modifier.width(12.dp))
 
-        androidx.compose.material3.TabRow(selectedTabIndex = tab) {
-            androidx.compose.material3.Tab(
-                selected = tab == 0,
-                onClick = { tab = 0 },
-                text = { Text("Home") }
+            Text(
+                text = when (tab) {
+                    0 -> "Music"
+                    1 -> "Search"
+                    2 -> "Library"
+                    3 -> "For You"
+                    else -> "Music"
+                },
+                style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.weight(1f)
             )
-            androidx.compose.material3.Tab(
-                selected = tab == 1,
-                onClick = { tab = 1 },
-                text = { Text("For You") }
-            )
-            androidx.compose.material3.Tab(
-                selected = tab == 2,
-                onClick = { tab = 2 },
-                text = { Text("Search") }
-            )
-            androidx.compose.material3.Tab(
-                selected = tab == 3,
-                onClick = { tab = 3 },
-                text = { Text("Favorites") }
-            )
+
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                androidx.compose.material3.IconButton(onClick = { showColorPicker = true }) {
+                    Text("⚙", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                }
+            }
         }
 
         when (tab) {
             0 -> {
-                if (recent.isEmpty()) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "No recently played songs yet — search something to get started.",
-                            modifier = Modifier.padding(top = 8.dp)
-                        )
-                    }
-                } else {
-                    LazyColumn(
+                val quickPicks = if (forYouTop.isNotEmpty()) forYouTop.take(6)
+                                 else forYouRecent.take(6)
+                LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f)
                             .padding(top = 8.dp)
                     ) {
-                        val items = recent.map { QueueItem(it.videoId, it.title) }
-                        itemsIndexed(recent, key = { _, song -> song.videoId }) { idx, song ->
-                            SongRow(
-                                song = song,
-                                onClick = { playFromQueue(items, idx) },
-                                onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } },
-                                onLongClick = { menuSong = song }
+                        item {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Quick picks",
+                                    style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                androidx.compose.material3.OutlinedButton(
+                                    onClick = {
+                                        if (quickPicks.isNotEmpty()) {
+                                            playFromQueue(
+                                                quickPicks.map { QueueItem(it.videoId, it.title) },
+                                                0
+                                            )
+                                        }
+                                    },
+                                    shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp)
+                                ) { Text("Play all") }
+                            }
+                        }
+
+                        items(quickPicks, key = { "qp_${it.videoId}" }) { song ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        playFromQueue(
+                                            quickPicks.map { QueueItem(it.videoId, it.title) },
+                                            quickPicks.indexOf(song)
+                                        )
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), 56.dp)
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        song.title,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        "${song.artist} · ${song.playCount} ${if (song.playCount == 1) "play" else "plays"}",
+                                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                                    IconButton(onClick = { menuSong = song }) {
+                                        Text("⋮", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                                    }
+                                }
+                            }
+                        }
+
+                        item {
+                            HorizontalCarousel(
+                                title = "Recently played",
+                                songs = forYouRecent,
+                                onSongClick = { song ->
+                                    playFromQueue(
+                                        forYouRecent.map { QueueItem(it.videoId, it.title) },
+                                        forYouRecent.indexOf(song)
+                                    )
+                                }
                             )
                         }
+                        item {
+                            if (topArtistName != null && forYouByArtist.isNotEmpty()) {
+                                HorizontalCarousel(
+                                    title = "More from $topArtistName",
+                                    songs = forYouByArtist,
+                                    onSongClick = { song ->
+                                        playFromQueue(
+                                            forYouByArtist.map { QueueItem(it.videoId, it.title) },
+                                            forYouByArtist.indexOf(song)
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                        item {
+                            HorizontalCarousel(
+                                title = "Your favorites",
+                                songs = forYouFavorites,
+                                onSongClick = { song ->
+                                    playFromQueue(
+                                        forYouFavorites.map { QueueItem(it.videoId, it.title) },
+                                        forYouFavorites.indexOf(song)
+                                    )
+                                }
+                            )
+                        }
+
+                        item { Spacer(Modifier.height(16.dp)) }
                     }
                 }
-            }
-            1 -> {
+            3 -> {
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -581,7 +748,7 @@ fun PlayerScreen(
                     }
                 }
             }
-            2 -> {
+            1 -> {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -620,12 +787,84 @@ fun PlayerScreen(
                     }
                 }
 
+                LaunchedEffect(query) {
+                    val trimmed = query.trim()
+                    if (trimmed.isBlank()) {
+                        results = emptyList()
+                        isSearching = false
+                        return@LaunchedEffect
+                    }
+                    if (trimmed.length < 2) return@LaunchedEffect
+                    kotlinx.coroutines.delay(600)
+                    isSearching = true
+                    try {
+                        val found = YtdlpHelper.searchYouTube(context, trimmed, 5)
+                        if (query.trim() == trimmed) {
+                            results = found
+                        }
+                    } catch (e: Exception) {
+                        Log.e("YTDL", "live search failed: ${e.message}")
+                    } finally {
+                        if (query.trim() == trimmed) isSearching = false
+                    }
+                }
+
+                LaunchedEffect(query) {
+                    val q = query.trim()
+                    if (q.isBlank()) {
+                        localMatches = emptyList()
+                        return@LaunchedEffect
+                    }
+                    localMatches = repo.searchLocal(q)
+                }
+
+                if (isSearching) {
+                    Text(
+                        text = "Searching…",
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 12.dp, top = 4.dp)
+                    )
+                }
+
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
                         .padding(top = 8.dp)
                 ) {
+                    if (localMatches.isNotEmpty()) {
+                        item {
+                            Text(
+                                "In your library",
+                                style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(start = 12.dp, top = 8.dp, bottom = 4.dp)
+                            )
+                        }
+                        items(localMatches, key = { it.videoId }) { song ->
+                            SongRow(
+                                song = song,
+                                onClick = {
+                                    playFromQueue(
+                                        localMatches.map { QueueItem(it.videoId, it.title) },
+                                        localMatches.indexOf(song)
+                                    )
+                                },
+                                onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } },
+                                onLongClick = { menuSong = song }
+                            )
+                        }
+                        item { HorizontalDivider() }
+                        item {
+                            Text(
+                                "From YouTube",
+                                style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 12.dp, top = 12.dp, bottom = 4.dp)
+                            )
+                        }
+                    }
                     val items = results.map { QueueItem(it.videoId, it.title) }
                     itemsIndexed(results, key = { _, result -> result.videoId }) { idx, result ->
                         Text(
@@ -641,6 +880,7 @@ fun PlayerScreen(
                                             videoId = result.videoId,
                                             title = result.title,
                                             artist = "YouTube",
+                                            thumbnailUrl = youtubeThumb(result.videoId),
                                             lastPlayedAt = 0L,
                                             playCount = 0,
                                             isFavorite = false,
@@ -654,129 +894,89 @@ fun PlayerScreen(
                     }
                 }
             }
-            3 -> {
-                if (favorites.isEmpty()) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "No favorites yet — tap ☆ on a song to add one.",
-                            modifier = Modifier.padding(top = 8.dp)
-                        )
-                    }
-                } else {
-                    LazyColumn(
+            2 -> {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .weight(1f)
-                            .padding(top = 8.dp)
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
                     ) {
-                        val items = favorites.map { QueueItem(it.videoId, it.title) }
-                        itemsIndexed(favorites, key = { _, song -> song.videoId }) { idx, song ->
-                            SongRow(
-                                song = song,
-                                onClick = { playFromQueue(items, idx) },
-                                onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } },
-                                onLongClick = { menuSong = song }
-                            )
-                        }
+                        FilterChip(
+                            selected = libraryTab == 0,
+                            onClick = { libraryTab = 0 },
+                            label = { Text("Playlists") }
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        FilterChip(
+                            selected = libraryTab == 1,
+                            onClick = { libraryTab = 1 },
+                            label = { Text("Favorites") }
+                        )
                     }
-                }
-            }
-        }
 
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Button(
-                onClick = {
-                    val c = controller
-                    if (c == null) {
-                        status = "Connecting..."
-                        return@Button
-                    }
-                    c.setMediaItem(
-                        MediaItem.Builder()
-                            .setUri("android.resource://${context.packageName}/${R.raw.sample}")
-                            .setMediaMetadata(
-                                androidx.media3.common.MediaMetadata.Builder()
-                                    .setTitle("Sample Track")
-                                    .setArtist("Local")
-                                    .build()
+                    when (libraryTab) {
+                        0 -> Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                        ) {
+                            PlaylistsScreen(
+                                playlists = playlists,
+                                openPlaylistId = openPlaylistId,
+                                playlistRepo = playlistRepo,
+                                onBack = { openPlaylistId = null },
+                                onOpenPlaylist = { id -> openPlaylistId = id },
+                                onPlayFromPlaylist = { songs, index ->
+                                    playFromQueue(songs.map { QueueItem(it.videoId, it.title) }, index)
+                                },
+                                onCreatePlaylist = { showNewPlaylistDialog = true },
+                                playlistName = playlists.firstOrNull { it.id == openPlaylistId }?.name ?: "",
+                                playlistCreatedAt = playlists.firstOrNull { it.id == openPlaylistId }?.createdAt ?: 0L,
+                                onRequestRename = {
+                                    renamePlaylistName = playlists.firstOrNull { it.id == openPlaylistId }?.name ?: ""
+                                    showRenamePlaylist = true
+                                },
+                                onRequestDelete = { showDeletePlaylistConfirm = true },
+                                onSongMenu = { ps ->
+                                    playlistMenuSong = ps
+                                    playlistMenuPlaylistId = openPlaylistId
+                                }
                             )
-                            .build()
-                    )
-                    c.prepare()
-                    c.play()
-                    status = "Playing (local)"
-                }
-            ) {
-                Text("Play")
-            }
-            Button(
-                onClick = {
-                    val c = controller
-                    if (c == null) {
-                        status = "Connecting..."
-                        return@Button
-                    }
-                    c.stop()
-                    isPlaying = false
-                    status = "Stopped"
-                },
-                modifier = Modifier.padding(top = 16.dp)
-            ) {
-                Text("Stop")
-            }
-            Button(
-                onClick = {
-                    val c = controller
-                    if (c == null) {
-                        status = "Connecting..."
-                        return@Button
-                    }
-                    status = "Extracting..."
-                    scope.launch {
-                        try {
-                            val url = YtdlpHelper.extractAudioUrl(context, TEST_VIDEO_URL)
-                            if (url != null) {
-                                Log.d("YTDL", "URL: $url")
-                                c.setMediaItem(
-                                    MediaItem.Builder()
-                                        .setUri(url)
-                                        .setMediaMetadata(
-                                            androidx.media3.common.MediaMetadata.Builder()
-                                                .setTitle("Rick Astley - Never Gonna Give You Up")
-                                                .setArtist("YouTube")
-                                                .build()
-                                        )
-                                        .build()
-                                )
-                                c.prepare()
-                                c.play()
-                                status = "Playing"
+                        }
+                        1 -> {
+                            if (favorites.isEmpty()) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "No favorites yet — tap ☆ on a song to add one.",
+                                        modifier = Modifier.padding(top = 8.dp)
+                                    )
+                                }
                             } else {
-                                val msg = "extraction returned null"
-                                Log.e("YTDL", "Failed: $msg")
-                                status = "Error: $msg"
-                                Toast.makeText(context, "Extraction failed: $msg", Toast.LENGTH_LONG).show()
+                                LazyColumn(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f)
+                                        .padding(top = 8.dp)
+                                ) {
+                                    val items = favorites.map { QueueItem(it.videoId, it.title) }
+                                    itemsIndexed(favorites, key = { _, song -> song.videoId }) { idx, song ->
+                                        SongRow(
+                                            song = song,
+                                            onClick = { playFromQueue(items, idx) },
+                                            onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } },
+                                            onLongClick = { menuSong = song }
+                                        )
+                                    }
+                                }
                             }
-                        } catch (e: Exception) {
-                            val msg = e.message ?: "unknown error"
-                            Log.e("YTDL", "Failed: $msg")
-                            status = "Error: $msg"
-                            Toast.makeText(context, "Extraction failed: $msg", Toast.LENGTH_LONG).show()
                         }
                     }
-                },
-                modifier = Modifier.padding(top = 16.dp)
-            ) {
-                Text("Play YT")
+                }
             }
-            Text(
-                text = status,
-                modifier = Modifier.padding(top = 16.dp)
-            )
         }
 
         if (nowPlayingTitle != null) {
@@ -829,6 +1029,51 @@ fun PlayerScreen(
                 androidx.compose.material3.IconButton(onClick = { playNext() }) {
                     Text("⏭", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
                 }
+            }
+        }
+
+        NavigationBar(
+            containerColor = androidx.compose.material3.MaterialTheme.colorScheme.background,
+            tonalElevation = 0.dp
+        ) {
+            val navItems = listOf(
+                Triple(0, "Home", "🏠"),
+                Triple(1, "Search", "🔍"),
+                Triple(2, "Library", "📚"),
+                Triple(3, "For You", "✨")
+            )
+            navItems.forEach { (idx, label, glyph) ->
+                NavigationBarItem(
+                    selected = tab == idx,
+                    onClick = { tab = idx },
+                    icon = {
+                        Text(
+                            glyph,
+                            style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                            color = if (tab == idx)
+                                androidx.compose.material3.MaterialTheme.colorScheme.primary
+                            else
+                                androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    },
+                    label = {
+                        Text(
+                            label,
+                            style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                            color = if (tab == idx)
+                                androidx.compose.material3.MaterialTheme.colorScheme.primary
+                            else
+                                androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    },
+                    colors = androidx.compose.material3.NavigationBarItemDefaults.colors(
+                        indicatorColor = androidx.compose.material3.MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                        selectedIconColor = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                        selectedTextColor = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                        unselectedIconColor = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                        unselectedTextColor = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                )
             }
         }
 
@@ -900,6 +1145,10 @@ fun PlayerScreen(
                         appendToQueue(song)
                         menuSong = null
                     }
+                    MenuItem("Add to playlist") {
+                        showAddToPlaylist = song
+                        menuSong = null
+                    }
                     MenuItem(
                         if (song.isFavorite) "Remove from favorites" else "Add to favorites"
                     ) {
@@ -909,6 +1158,189 @@ fun PlayerScreen(
                     MenuItem("Not interested") {
                         scope.launch { repo.hide(song) }
                         menuSong = null
+                    }
+                }
+            }
+        }
+
+        if (showNewPlaylistDialog) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showNewPlaylistDialog = false; newPlaylistName = "" },
+                title = { Text("New playlist") },
+                text = {
+                    OutlinedTextField(
+                        value = newPlaylistName,
+                        onValueChange = { newPlaylistName = it },
+                        label = { Text("Name") },
+                        singleLine = true
+                    )
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            val name = newPlaylistName.trim()
+                            if (name.isNotBlank()) {
+                                scope.launch { playlistRepo.create(name) }
+                                newPlaylistName = ""
+                                showNewPlaylistDialog = false
+                            }
+                        }
+                    ) { Text("Create") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(
+                        onClick = { showNewPlaylistDialog = false; newPlaylistName = "" }
+                    ) { Text("Cancel") }
+                }
+            )
+        }
+
+        val addSong = showAddToPlaylist
+        if (addSong != null) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showAddToPlaylist = null },
+                title = { Text("Add to playlist") },
+                text = {
+                    Column {
+                        if (playlists.isEmpty()) {
+                            Text("No playlists yet. Create one first.")
+                        } else {
+                            LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
+                                items(playlists, key = { it.id }) { pl ->
+                                    androidx.compose.material3.TextButton(
+                                        onClick = {
+                                            scope.launch {
+                                                playlistRepo.addSong(
+                                                    pl.id,
+                                                    addSong.videoId,
+                                                    addSong.title,
+                                                    addSong.artist,
+                                                    addSong.thumbnailUrl
+                                                )
+                                            }
+                                            showAddToPlaylist = null
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(pl.name, modifier = Modifier.fillMaxWidth())
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        showAddToPlaylist = null
+                        showPlaylists = true
+                    }) { Text("Manage playlists") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(
+                        onClick = { showAddToPlaylist = null }
+                    ) { Text("Cancel") }
+                }
+            )
+        }
+
+        if (showRenamePlaylist && openPlaylistId != null) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showRenamePlaylist = false },
+                title = { Text("Rename playlist") },
+                text = {
+                    OutlinedTextField(
+                        value = renamePlaylistName,
+                        onValueChange = { renamePlaylistName = it },
+                        label = { Text("Name") },
+                        singleLine = true
+                    )
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        val name = renamePlaylistName.trim()
+                        val id = openPlaylistId
+                        if (name.isNotBlank() && id != null) {
+                            scope.launch { playlistRepo.rename(id, name) }
+                        }
+                        showRenamePlaylist = false
+                    }) { Text("Save") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(
+                        onClick = { showRenamePlaylist = false }
+                    ) { Text("Cancel") }
+                }
+            )
+        }
+
+        if (showDeletePlaylistConfirm && openPlaylistId != null) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showDeletePlaylistConfirm = false },
+                title = { Text("Delete playlist?") },
+                text = { Text("This cannot be undone.") },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        val id = openPlaylistId
+                        if (id != null) {
+                            scope.launch { playlistRepo.delete(id) }
+                        }
+                        openPlaylistId = null
+                        showDeletePlaylistConfirm = false
+                    }) { Text("Delete") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(
+                        onClick = { showDeletePlaylistConfirm = false }
+                    ) { Text("Cancel") }
+                }
+            )
+        }
+
+        val ps = playlistMenuSong
+        if (ps != null && playlistMenuPlaylistId != null) {
+            androidx.compose.material3.ModalBottomSheet(
+                onDismissRequest = { playlistMenuSong = null }
+            ) {
+                Column(modifier = Modifier.padding(bottom = 24.dp)) {
+                    Text(
+                        text = ps.title,
+                        style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    )
+                    HorizontalDivider()
+
+                    MenuItem("Play next") {
+                        insertIntoQueueNext(
+                            Song(
+                                videoId = ps.videoId,
+                                title = ps.title,
+                                artist = ps.artist,
+                                thumbnailUrl = ps.thumbnailUrl ?: youtubeThumb(ps.videoId),
+                                lastPlayedAt = 0L,
+                                playCount = 0
+                            )
+                        )
+                        playlistMenuSong = null
+                    }
+                    MenuItem("Add to queue") {
+                        appendToQueue(
+                            Song(
+                                videoId = ps.videoId,
+                                title = ps.title,
+                                artist = ps.artist,
+                                thumbnailUrl = ps.thumbnailUrl ?: youtubeThumb(ps.videoId),
+                                lastPlayedAt = 0L,
+                                playCount = 0
+                            )
+                        )
+                        playlistMenuSong = null
+                    }
+                    MenuItem("Remove from playlist") {
+                        val pid = playlistMenuPlaylistId!!
+                        scope.launch { playlistRepo.removeSong(pid, ps.videoId) }
+                        playlistMenuSong = null
                     }
                 }
             }
@@ -957,7 +1389,7 @@ fun RecommendationRow(
                         .padding(horizontal = 4.dp)
                         .clickable { onSongClick(song) }
                 ) {
-                    Thumbnail(song.thumbnailUrl, size = 132.dp)
+                    Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), size = 132.dp)
                     Text(
                         text = song.title,
                         maxLines = 2,
@@ -966,6 +1398,53 @@ fun RecommendationRow(
                     )
                     Text(
                         text = song.artist,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun HorizontalCarousel(
+    title: String,
+    songs: List<Song>,
+    onSongClick: (Song) -> Unit
+) {
+    if (songs.isEmpty()) return
+    Column(modifier = Modifier
+        .fillMaxWidth()
+        .padding(vertical = 12.dp)) {
+        Text(
+            title,
+            style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(start = 16.dp, bottom = 12.dp)
+        )
+        androidx.compose.foundation.lazy.LazyRow(
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp)
+        ) {
+            items(songs, key = { it.videoId }) { song ->
+                Column(
+                    modifier = Modifier
+                        .width(160.dp)
+                        .padding(end = 12.dp)
+                        .clickable { onSongClick(song) }
+                ) {
+                    Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), 160.dp)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        song.title,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        song.artist,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
@@ -1014,7 +1493,7 @@ fun SongRow(
             .padding(vertical = 12.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Thumbnail(song.thumbnailUrl, 48.dp)
+        Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), 48.dp)
         Spacer(Modifier.width(8.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -1050,6 +1529,28 @@ fun formatTime(ms: Long): String {
     return "%d:%02d".format(s / 60, s % 60)
 }
 
+fun youtubeThumb(videoId: String): String =
+    "https://i.ytimg.com/vi/$videoId/mqdefault.jpg"
+
+fun formatDate(epochMs: Long): String {
+    val sdf = java.text.SimpleDateFormat("MMM yyyy", java.util.Locale.getDefault())
+    return sdf.format(java.util.Date(epochMs))
+}
+
+@Composable
+fun thumbCell(url: String?, modifier: Modifier) {
+    if (url == null) {
+        Box(modifier.background(androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant))
+    } else {
+        coil.compose.AsyncImage(
+            model = url,
+            contentDescription = null,
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            modifier = modifier
+        )
+    }
+}
+
 @Composable
 fun NowPlayingScreen(
     title: String,
@@ -1071,8 +1572,11 @@ fun NowPlayingScreen(
     videoModeLoading: Boolean,
     onToggleVideoMode: () -> Unit,
     mediaController: MediaController?,
-    lyricsTab: Int,
-    onLyricsTabChange: (Int) -> Unit,
+    nowPlayingTab: Int,
+    onNowPlayingTabChange: (Int) -> Unit,
+    queue: List<QueueItem>,
+    queueIndex: Int,
+    onQueueItemClick: (Int) -> Unit,
     onBack: () -> Unit,
     onPlayPause: () -> Unit,
     onPrev: () -> Unit,
@@ -1104,20 +1608,33 @@ fun NowPlayingScreen(
             }
         }
 
-        androidx.compose.material3.TabRow(selectedTabIndex = lyricsTab) {
+        androidx.compose.material3.TabRow(selectedTabIndex = nowPlayingTab) {
             androidx.compose.material3.Tab(
-                selected = lyricsTab == 0,
-                onClick = { onLyricsTabChange(0) },
+                selected = nowPlayingTab == 0,
+                onClick = { onNowPlayingTabChange(0) },
                 text = { Text("Art") }
             )
             androidx.compose.material3.Tab(
-                selected = lyricsTab == 1,
-                onClick = { onLyricsTabChange(1) },
+                selected = nowPlayingTab == 1,
+                onClick = { onNowPlayingTabChange(1) },
                 text = { Text("Lyrics") }
+            )
+            androidx.compose.material3.Tab(
+                selected = nowPlayingTab == 2,
+                onClick = { onNowPlayingTabChange(2) },
+                text = { Text("Queue") }
             )
         }
 
-        when (lyricsTab) {
+        val queueListState = androidx.compose.foundation.lazy.rememberLazyListState()
+
+        androidx.compose.runtime.LaunchedEffect(nowPlayingTab, queueIndex) {
+            if (nowPlayingTab == 2 && queueIndex >= 0) {
+                queueListState.animateScrollToItem(queueIndex)
+            }
+        }
+
+        when (nowPlayingTab) {
             0 -> {
                 Spacer(modifier = Modifier.weight(0.6f))
 
@@ -1198,7 +1715,7 @@ fun NowPlayingScreen(
                     }
                 }
             }
-            else -> {
+            1 -> {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1252,9 +1769,64 @@ fun NowPlayingScreen(
                     }
                 }
             }
+            2 -> {
+                if (queue.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("Queue is empty.")
+                    }
+                } else {
+                    androidx.compose.foundation.lazy.LazyColumn(
+                        state = queueListState,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    ) {
+                        itemsIndexed(queue) { idx, item ->
+                            val isCurrent = idx == queueIndex
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onQueueItemClick(idx) }
+                                    .padding(vertical = 12.dp, horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (isCurrent) {
+                                    Text(
+                                        "▶",
+                                        color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(end = 8.dp)
+                                    )
+                                } else {
+                                    Text(
+                                        "${idx + 1}.",
+                                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(end = 8.dp)
+                                    )
+                                }
+                                Text(
+                                    text = item.title,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = if (isCurrent)
+                                        androidx.compose.material3.MaterialTheme.colorScheme.primary
+                                    else
+                                        androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            }
         }
 
-        // Progress bar + time labels (visible in both tabs)
+        // Progress bar + time labels (visible in all tabs)
         val displayPos = if (isScrubbing) scrubPositionMs else currentPosMs
         val maxVal = currentDurationMs.coerceAtLeast(1L).toFloat()
         androidx.compose.material3.Slider(
@@ -1374,6 +1946,347 @@ fun NowPlayingScreen(
         }
 
         Spacer(modifier = Modifier.weight(0.4f))
+    }
+}
+
+@Composable
+fun PlaylistSongsContent(
+    playlistSongs: List<PlaylistSong>,
+    playlistName: String,
+    playlistCreatedAt: Long,
+    onBack: () -> Unit,
+    onPlayFromPlaylist: (List<PlaylistSong>, Int) -> Unit,
+    onRequestRename: () -> Unit,
+    onRequestDelete: () -> Unit,
+    onSongMenu: (PlaylistSong) -> Unit
+) {
+    val listState = rememberLazyListState()
+    var showOverflow by remember(playlistName) { mutableStateOf(false) }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(androidx.compose.material3.MaterialTheme.colorScheme.background),
+        state = listState
+    ) {
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    androidx.compose.material3.IconButton(onClick = onBack) {
+                        Text(
+                            "←",
+                            style = androidx.compose.material3.MaterialTheme.typography.headlineMedium
+                        )
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    androidx.compose.material3.IconButton(onClick = { showOverflow = true }) {
+                        Text(
+                            "⋮",
+                            style = androidx.compose.material3.MaterialTheme.typography.headlineMedium
+                        )
+                    }
+                    androidx.compose.material3.DropdownMenu(
+                        expanded = showOverflow,
+                        onDismissRequest = { showOverflow = false }
+                    ) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Rename") },
+                            onClick = { showOverflow = false; onRequestRename() }
+                        )
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { Text("Delete") },
+                            onClick = { showOverflow = false; onRequestDelete() }
+                        )
+                    }
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 8.dp)
+                    .aspectRatio(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                val thumbs = playlistSongs.take(4).map {
+                    it.thumbnailUrl ?: youtubeThumb(it.videoId)
+                }
+                when {
+                    thumbs.isEmpty() -> {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .background(androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant)
+                        )
+                    }
+                    thumbs.size == 1 -> {
+                        coil.compose.AsyncImage(
+                            model = thumbs[0],
+                            contentDescription = null,
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    else -> {
+                        Column(Modifier.fillMaxSize()) {
+                            Row(Modifier.weight(1f)) {
+                                thumbCell(thumbs.getOrNull(0), Modifier.weight(1f))
+                                thumbCell(thumbs.getOrNull(1), Modifier.weight(1f))
+                            }
+                            Row(Modifier.weight(1f)) {
+                                thumbCell(thumbs.getOrNull(2), Modifier.weight(1f))
+                                thumbCell(thumbs.getOrNull(3), Modifier.weight(1f))
+                            }
+                        }
+                    }
+                }
+            }
+
+            Text(
+                text = playlistName,
+                style = androidx.compose.material3.MaterialTheme.typography.headlineMedium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 8.dp)
+            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .background(
+                            androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                            CircleShape
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "Y",
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "You",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
+                )
+            }
+
+            Text(
+                text = "${playlistSongs.size} songs · Created ${formatDate(playlistCreatedAt)}",
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp)
+            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .background(
+                            androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                            CircleShape
+                        )
+                        .clickable {
+                            if (playlistSongs.isNotEmpty()) {
+                                onPlayFromPlaylist(playlistSongs, 0)
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "▶",
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
+                        style = androidx.compose.material3.MaterialTheme.typography.titleLarge
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    androidx.compose.material3.IconButton(onClick = { onRequestRename() }) {
+                        Text(
+                            "✏",
+                            style = androidx.compose.material3.MaterialTheme.typography.titleLarge
+                        )
+                    }
+                }
+                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    androidx.compose.material3.IconButton(onClick = { onRequestDelete() }) {
+                        Text(
+                            "🗑",
+                            style = androidx.compose.material3.MaterialTheme.typography.titleLarge
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider()
+        }
+
+        itemsIndexed(playlistSongs, key = { _, s -> s.videoId }) { idx, ps ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onPlayFromPlaylist(playlistSongs, idx) }
+                    .padding(vertical = 8.dp, horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Thumbnail(ps.thumbnailUrl ?: youtubeThumb(ps.videoId), 48.dp)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        ps.title,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        ps.artist,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    androidx.compose.material3.IconButton(onClick = { onSongMenu(ps) }) {
+                        Text(
+                            "⋮",
+                            style = androidx.compose.material3.MaterialTheme.typography.titleMedium
+                        )
+                    }
+                }
+            }
+            HorizontalDivider()
+        }
+
+        item { Spacer(Modifier.height(96.dp)) }
+    }
+}
+
+@Composable
+fun PlaylistsScreen(
+    playlists: List<Playlist>,
+    openPlaylistId: Long?,
+    playlistRepo: PlaylistRepository,
+    onBack: () -> Unit,
+    onOpenPlaylist: (Long) -> Unit,
+    onPlayFromPlaylist: (List<PlaylistSong>, Int) -> Unit,
+    onCreatePlaylist: () -> Unit,
+    playlistName: String,
+    playlistCreatedAt: Long,
+    onRequestRename: () -> Unit,
+    onRequestDelete: () -> Unit,
+    onSongMenu: (PlaylistSong) -> Unit
+) {
+    if (openPlaylistId != null) {
+        val playlistSongs by remember(openPlaylistId) {
+            playlistRepo.songs(openPlaylistId)
+        }.collectAsState(initial = emptyList())
+
+        LaunchedEffect(openPlaylistId) {
+            val list = playlistRepo.songs(openPlaylistId).first()
+            Log.d("PLAYLIST", "loaded ${list.size} songs for playlist $openPlaylistId")
+        }
+
+        PlaylistSongsContent(
+            playlistSongs = playlistSongs,
+            playlistName = playlistName,
+            playlistCreatedAt = playlistCreatedAt,
+            onBack = onBack,
+            onPlayFromPlaylist = onPlayFromPlaylist,
+            onRequestRename = onRequestRename,
+            onRequestDelete = onRequestDelete,
+            onSongMenu = onSongMenu
+        )
+        return
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(androidx.compose.material3.MaterialTheme.colorScheme.background)
+            .padding(24.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onCreatePlaylist() }
+                .padding(vertical = 14.dp, horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .background(
+                        androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                        androidx.compose.foundation.shape.CircleShape
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "+",
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
+                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Text(
+                "New playlist",
+                style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+            )
+        }
+        HorizontalDivider()
+
+        if (playlists.isEmpty()) {
+            Text("No playlists yet.", modifier = Modifier.padding(top = 8.dp))
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                items(playlists, key = { it.id }) { pl ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenPlaylist(pl.id) }
+                            .padding(vertical = 12.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = pl.name,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
+                            style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    HorizontalDivider()
+                }
+            }
+        }
     }
 }
 
