@@ -19,4 +19,10 @@ interface SongDao {
 
     @Query("SELECT COUNT(*) FROM songs")
     suspend fun count(): Int
+
+    @Query("UPDATE songs SET isFavorite = :fav WHERE videoId = :videoId")
+    suspend fun setFavorite(videoId: String, fav: Boolean)
+
+    @Query("SELECT * FROM songs WHERE isFavorite = 1 ORDER BY lastPlayedAt DESC")
+    fun favorites(): Flow<List<Song>>
 }

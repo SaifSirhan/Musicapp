@@ -19,7 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedTextField
@@ -44,11 +44,14 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.sharl.musicapp.data.Song
 import com.sharl.musicapp.data.SongRepository
 import com.sharl.musicapp.ui.theme.MusicAppTheme
 import kotlinx.coroutines.launch
 
 private const val TEST_VIDEO_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+data class QueueItem(val videoId: String, val title: String)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -70,7 +73,8 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
     val repo = remember { SongRepository(context) }
     val recent by repo.recentlyPlayed().collectAsState(initial = emptyList())
-    var tab by remember { mutableStateOf(0) }  // 0 = Home, 1 = Search
+    val favorites by repo.favorites().collectAsState(initial = emptyList())
+    var tab by remember { mutableStateOf(0) }  // 0 = Home, 1 = Search, 2 = Favorites
 
     var status by remember { mutableStateOf("Connecting...") }
     var query by remember { mutableStateOf("") }
@@ -78,6 +82,12 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
 
     var controller by remember { mutableStateOf<MediaController?>(null) }
     var connected by remember { mutableStateOf(false) }
+
+    var queue by remember { mutableStateOf<List<QueueItem>>(emptyList()) }
+    var queueIndex by remember { mutableStateOf(-1) }
+    var nowPlayingTitle by remember { mutableStateOf<String?>(null) }
+    var nowPlayingArtist by remember { mutableStateOf<String?>(null) }
+    var isPlaying by remember { mutableStateOf(false) }
 
     DisposableEffect(context) {
         Log.d("CTRL", "Connecting to PlaybackService...")
@@ -128,26 +138,32 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    fun playVideo(videoId: String, title: String) {
+    fun playFromQueue(items: List<QueueItem>, index: Int) {
         if (controller == null) {
             status = "Connecting..."
             return
         }
+        if (index !in items.indices) return
+        queue = items
+        queueIndex = index
+        val item = items[index]
+        nowPlayingTitle = item.title
+        nowPlayingArtist = "YouTube"
         status = "Extracting..."
         scope.launch {
             try {
-                val url = YtdlpHelper.extractAudioUrlForId(context, videoId)
+                val url = YtdlpHelper.extractAudioUrlForId(context, item.videoId)
                 if (url == null) {
                     status = "Error: extraction returned null"
                     return@launch
                 }
-                repo.recordPlay(videoId, title, "YouTube")
+                repo.recordPlay(item.videoId, item.title, "YouTube")
                 controller!!.setMediaItem(
                     MediaItem.Builder()
                         .setUri(url)
                         .setMediaMetadata(
                             androidx.media3.common.MediaMetadata.Builder()
-                                .setTitle(title)
+                                .setTitle(item.title)
                                 .setArtist("YouTube")
                                 .build()
                         )
@@ -155,13 +171,30 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                 )
                 controller!!.prepare()
                 controller!!.play()
-                status = "Playing: $title"
+                isPlaying = true
+                status = "Playing: ${item.title}"
             } catch (e: Exception) {
                 val msg = e.message ?: "unknown error"
                 Log.e("YTDL", "Failed: $msg")
                 status = "Error: $msg"
             }
         }
+    }
+
+    fun playNext() {
+        if (queueIndex < 0 || queueIndex >= queue.size - 1) {
+            status = "End of queue"
+            return
+        }
+        playFromQueue(queue, queueIndex + 1)
+    }
+
+    fun playPrev() {
+        if (queueIndex <= 0) {
+            status = "Start of queue"
+            return
+        }
+        playFromQueue(queue, queueIndex - 1)
     }
 
     Column(
@@ -179,6 +212,11 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                 selected = tab == 1,
                 onClick = { tab = 1 },
                 text = { Text("Search") }
+            )
+            androidx.compose.material3.Tab(
+                selected = tab == 2,
+                onClick = { tab = 2 },
+                text = { Text("Favorites") }
             )
         }
 
@@ -198,21 +236,13 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                             .weight(1f)
                             .padding(top = 8.dp)
                     ) {
-                        items(recent, key = { it.videoId }) { song ->
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { playVideo(song.videoId, song.title) }
-                                    .padding(vertical = 12.dp)
-                            ) {
-                                Text(
-                                    text = song.title,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(text = "${song.artist} · ${song.playCount} plays")
-                            }
-                            HorizontalDivider()
+                        val items = recent.map { QueueItem(it.videoId, it.title) }
+                        itemsIndexed(recent, key = { _, song -> song.videoId }) { idx, song ->
+                            SongRow(
+                                song = song,
+                                onClick = { playFromQueue(items, idx) },
+                                onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } }
+                            )
                         }
                     }
                 }
@@ -262,17 +292,44 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                         .weight(1f)
                         .padding(top = 8.dp)
                 ) {
-                    items(results, key = { it.videoId }) { result ->
+                    val items = results.map { QueueItem(it.videoId, it.title) }
+                    itemsIndexed(results, key = { _, result -> result.videoId }) { idx, result ->
                         Text(
                             text = result.title,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { playVideo(result.videoId, result.title) }
+                                .clickable { playFromQueue(items, idx) }
                                 .padding(vertical = 12.dp)
                         )
                         HorizontalDivider()
+                    }
+                }
+            }
+            2 -> {
+                if (favorites.isEmpty()) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "No favorites yet — tap ☆ on a song to add one.",
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .padding(top = 8.dp)
+                    ) {
+                        val items = favorites.map { QueueItem(it.videoId, it.title) }
+                        itemsIndexed(favorites, key = { _, song -> song.videoId }) { idx, song ->
+                            SongRow(
+                                song = song,
+                                onClick = { playFromQueue(items, idx) },
+                                onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } }
+                            )
+                        }
                     }
                 }
             }
@@ -316,6 +373,7 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                         return@Button
                     }
                     c.stop()
+                    isPlaying = false
                     status = "Stopped"
                 },
                 modifier = Modifier.padding(top = 16.dp)
@@ -372,7 +430,89 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                 modifier = Modifier.padding(top = 16.dp)
             )
         }
+
+        if (nowPlayingTitle != null) {
+            HorizontalDivider()
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = nowPlayingTitle ?: "",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = nowPlayingArtist ?: "",
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                androidx.compose.material3.IconButton(onClick = { playPrev() }) {
+                    Text("⏮", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                }
+                androidx.compose.material3.IconButton(
+                    onClick = {
+                        val c = controller ?: return@IconButton
+                        if (c.isPlaying) {
+                            c.pause()
+                            isPlaying = false
+                        } else {
+                            c.play()
+                            isPlaying = true
+                        }
+                    }
+                ) {
+                    Text(
+                        if (isPlaying) "⏸" else "▶",
+                        style = androidx.compose.material3.MaterialTheme.typography.titleLarge
+                    )
+                }
+                androidx.compose.material3.IconButton(onClick = { playNext() }) {
+                    Text("⏭", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                }
+            }
+        }
     }
+}
+
+@Composable
+fun SongRow(
+    song: Song,
+    onClick: () -> Unit,
+    onToggleFavorite: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(vertical = 12.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = song.title,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            val playLabel = if (song.playCount == 1) "play" else "plays"
+            Text(
+                text = "${song.artist} · ${song.playCount} $playLabel",
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall
+            )
+        }
+        androidx.compose.material3.IconButton(onClick = onToggleFavorite) {
+            Text(
+                text = if (song.isFavorite) "★" else "☆",
+                style = androidx.compose.material3.MaterialTheme.typography.titleLarge
+            )
+        }
+    }
+    HorizontalDivider()
 }
 
 @Preview(showBackground = true)

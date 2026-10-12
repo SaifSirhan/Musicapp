@@ -14,10 +14,17 @@ class SongRepository(context: Context) {
                 title = title,
                 artist = artist,
                 lastPlayedAt = now,
-                playCount = (existing?.playCount ?: 0) + 1
+                playCount = (existing?.playCount ?: 0) + 1,
+                isFavorite = existing?.isFavorite ?: false
             )
         )
     }
 
     fun recentlyPlayed() = dao.recentlyPlayed()
+
+    suspend fun toggleFavorite(song: Song) {
+        dao.setFavorite(song.videoId, !song.isFavorite)
+    }
+
+    fun favorites() = dao.favorites()
 }
