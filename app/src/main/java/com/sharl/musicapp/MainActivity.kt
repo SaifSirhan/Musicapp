@@ -1,12 +1,16 @@
 package com.sharl.musicapp
 
+import android.Manifest
 import android.content.ComponentName
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -23,6 +27,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,6 +44,7 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.sharl.musicapp.data.SongRepository
 import com.sharl.musicapp.ui.theme.MusicAppTheme
 import kotlinx.coroutines.launch
 
@@ -61,6 +68,9 @@ class MainActivity : ComponentActivity() {
 fun PlayerScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val repo = remember { SongRepository(context) }
+    val recent by repo.recentlyPlayed().collectAsState(initial = emptyList())
+    var tab by remember { mutableStateOf(0) }  // 0 = Home, 1 = Search
 
     var status by remember { mutableStateOf("Connecting...") }
     var query by remember { mutableStateOf("") }
@@ -93,95 +103,178 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    var notifPermissionGranted by remember { mutableStateOf(false) }
+
+    val notifLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        notifPermissionGranted = granted
+        if (!granted) {
+            status = "Notification permission denied — controls hidden"
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val already = ContextCompat.checkSelfPermission(
+                context, Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            notifPermissionGranted = already
+            if (!already) {
+                notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        } else {
+            notifPermissionGranted = true  // not required pre-33
+        }
+    }
+
+    fun playVideo(videoId: String, title: String) {
+        if (controller == null) {
+            status = "Connecting..."
+            return
+        }
+        status = "Extracting..."
+        scope.launch {
+            try {
+                val url = YtdlpHelper.extractAudioUrlForId(context, videoId)
+                if (url == null) {
+                    status = "Error: extraction returned null"
+                    return@launch
+                }
+                repo.recordPlay(videoId, title, "YouTube")
+                controller!!.setMediaItem(
+                    MediaItem.Builder()
+                        .setUri(url)
+                        .setMediaMetadata(
+                            androidx.media3.common.MediaMetadata.Builder()
+                                .setTitle(title)
+                                .setArtist("YouTube")
+                                .build()
+                        )
+                        .build()
+                )
+                controller!!.prepare()
+                controller!!.play()
+                status = "Playing: $title"
+            } catch (e: Exception) {
+                val msg = e.message ?: "unknown error"
+                Log.e("YTDL", "Failed: $msg")
+                status = "Error: $msg"
+            }
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                label = { Text("Search YouTube") },
-                singleLine = true,
-                modifier = Modifier.weight(1f)
+        androidx.compose.material3.TabRow(selectedTabIndex = tab) {
+            androidx.compose.material3.Tab(
+                selected = tab == 0,
+                onClick = { tab = 0 },
+                text = { Text("Home") }
             )
-            Button(
-                onClick = {
-                    val q = query.trim()
-                    if (q.isEmpty()) {
-                        status = "Error: empty query"
-                        return@Button
-                    }
-                    status = "Searching..."
-                    scope.launch {
-                        try {
-                            val found = YtdlpHelper.searchYouTube(context, q, 5)
-                            results = found
-                            status = "Found ${found.size} results"
-                        } catch (e: Exception) {
-                            val msg = e.message ?: "unknown error"
-                            Log.e("YTDL", "Search failed: $msg")
-                            status = "Error: $msg"
-                            Toast.makeText(context, "Search failed: $msg", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                },
-                modifier = Modifier.padding(start = 8.dp)
-            ) {
-                Text("Search")
-            }
+            androidx.compose.material3.Tab(
+                selected = tab == 1,
+                onClick = { tab = 1 },
+                text = { Text("Search") }
+            )
         }
 
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .padding(top = 8.dp)
-        ) {
-            items(results, key = { it.videoId }) { result ->
-                Text(
-                    text = result.title,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            val c = controller
-                            if (c == null) {
-                                status = "Connecting..."
-                                return@clickable
+        when (tab) {
+            0 -> {
+                if (recent.isEmpty()) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "No recently played songs yet — search something to get started.",
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .padding(top = 8.dp)
+                    ) {
+                        items(recent, key = { it.videoId }) { song ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { playVideo(song.videoId, song.title) }
+                                    .padding(vertical = 12.dp)
+                            ) {
+                                Text(
+                                    text = song.title,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(text = "${song.artist} · ${song.playCount} plays")
                             }
-                            status = "Extracting..."
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            }
+            1 -> {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        label = { Text("Search YouTube") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Button(
+                        onClick = {
+                            val q = query.trim()
+                            if (q.isEmpty()) {
+                                status = "Error: empty query"
+                                return@Button
+                            }
+                            status = "Searching..."
                             scope.launch {
                                 try {
-                                    val url = YtdlpHelper.extractAudioUrlForId(context, result.videoId)
-                                    if (url != null) {
-                                        Log.d("YTDL", "URL: $url")
-                                        c.setMediaItem(MediaItem.fromUri(url))
-                                        c.prepare()
-                                        c.play()
-                                        status = "Playing: ${result.title}"
-                                    } else {
-                                        val msg = "extraction returned null"
-                                        Log.e("YTDL", "Failed: $msg")
-                                        status = "Error: $msg"
-                                        Toast.makeText(context, "Extraction failed: $msg", Toast.LENGTH_LONG).show()
-                                    }
+                                    val found = YtdlpHelper.searchYouTube(context, q, 5)
+                                    results = found
+                                    status = "Found ${found.size} results"
                                 } catch (e: Exception) {
                                     val msg = e.message ?: "unknown error"
-                                    Log.e("YTDL", "Failed: $msg")
+                                    Log.e("YTDL", "Search failed: $msg")
                                     status = "Error: $msg"
-                                    Toast.makeText(context, "Extraction failed: $msg", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(context, "Search failed: $msg", Toast.LENGTH_LONG).show()
                                 }
                             }
-                        }
-                        .padding(vertical = 12.dp)
-                )
-                HorizontalDivider()
+                        },
+                        modifier = Modifier.padding(start = 8.dp)
+                    ) {
+                        Text("Search")
+                    }
+                }
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(top = 8.dp)
+                ) {
+                    items(results, key = { it.videoId }) { result ->
+                        Text(
+                            text = result.title,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { playVideo(result.videoId, result.title) }
+                                .padding(vertical = 12.dp)
+                        )
+                        HorizontalDivider()
+                    }
+                }
             }
         }
 
@@ -198,7 +291,15 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                         return@Button
                     }
                     c.setMediaItem(
-                        MediaItem.fromUri("android.resource://${context.packageName}/${R.raw.sample}")
+                        MediaItem.Builder()
+                            .setUri("android.resource://${context.packageName}/${R.raw.sample}")
+                            .setMediaMetadata(
+                                androidx.media3.common.MediaMetadata.Builder()
+                                    .setTitle("Sample Track")
+                                    .setArtist("Local")
+                                    .build()
+                            )
+                            .build()
                     )
                     c.prepare()
                     c.play()
@@ -234,7 +335,17 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                             val url = YtdlpHelper.extractAudioUrl(context, TEST_VIDEO_URL)
                             if (url != null) {
                                 Log.d("YTDL", "URL: $url")
-                                c.setMediaItem(MediaItem.fromUri(url))
+                                c.setMediaItem(
+                                    MediaItem.Builder()
+                                        .setUri(url)
+                                        .setMediaMetadata(
+                                            androidx.media3.common.MediaMetadata.Builder()
+                                                .setTitle("Rick Astley - Never Gonna Give You Up")
+                                                .setArtist("YouTube")
+                                                .build()
+                                        )
+                                        .build()
+                                )
                                 c.prepare()
                                 c.play()
                                 status = "Playing"
