@@ -1,5 +1,6 @@
 package com.sharl.musicapp
 
+import android.content.ComponentName
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
@@ -33,9 +34,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
 import com.sharl.musicapp.ui.theme.MusicAppTheme
 import kotlinx.coroutines.launch
 
@@ -60,44 +62,35 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var status by remember { mutableStateOf("Idle") }
+    var status by remember { mutableStateOf("Connecting...") }
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<SearchResult>>(emptyList()) }
 
-    val player = remember {
-        val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        val httpFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
-            .setUserAgent(ua)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(15_000)
-            .setAllowCrossProtocolRedirects(true)
-        val dsFactory = androidx.media3.datasource.DefaultDataSource.Factory(
-            context, httpFactory
+    var controller by remember { mutableStateOf<MediaController?>(null) }
+    var connected by remember { mutableStateOf(false) }
+
+    DisposableEffect(context) {
+        Log.d("CTRL", "Connecting to PlaybackService...")
+        val token = SessionToken(
+            context,
+            ComponentName(context, PlaybackService::class.java)
         )
-        val msFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dsFactory)
-        ExoPlayer.Builder(context)
-            .setMediaSourceFactory(msFactory)
-            .build()
-            .apply {
-                setMediaItem(MediaItem.fromUri(
-                    "android.resource://${context.packageName}/${R.raw.sample}"
-                ))
-                prepare()
+        val future = MediaController.Builder(context, token).buildAsync()
+        future.addListener({
+            try {
+                controller = future.get()
+                connected = true
+                status = "Ready"
+                Log.d("CTRL", "MediaController connected")
+            } catch (e: Exception) {
+                status = "Controller error: ${e.message}"
+                Log.e("CTRL", "MediaController connection failed", e)
             }
-    }
-
-    DisposableEffect(player) {
-        onDispose { player.release() }
-    }
-
-    remember(player) {
-        player.addListener(object : Player.Listener {
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                Log.e("EXOPLAYER", "code=${error.errorCodeName} msg=${error.message}", error)
-                status = "Playback error: ${error.errorCodeName}"
-            }
-        })
+        }, ContextCompat.getMainExecutor(context))
+        onDispose {
+            MediaController.releaseFuture(future)
+            Log.d("CTRL", "MediaController released")
+        }
     }
 
     Column(
@@ -157,15 +150,20 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
+                            val c = controller
+                            if (c == null) {
+                                status = "Connecting..."
+                                return@clickable
+                            }
                             status = "Extracting..."
                             scope.launch {
                                 try {
                                     val url = YtdlpHelper.extractAudioUrlForId(context, result.videoId)
                                     if (url != null) {
                                         Log.d("YTDL", "URL: $url")
-                                        player.setMediaItem(MediaItem.fromUri(url))
-                                        player.prepare()
-                                        player.play()
+                                        c.setMediaItem(MediaItem.fromUri(url))
+                                        c.prepare()
+                                        c.play()
                                         status = "Playing: ${result.title}"
                                     } else {
                                         val msg = "extraction returned null"
@@ -194,33 +192,51 @@ fun PlayerScreen(modifier: Modifier = Modifier) {
         ) {
             Button(
                 onClick = {
-                    player.setMediaItem(
+                    val c = controller
+                    if (c == null) {
+                        status = "Connecting..."
+                        return@Button
+                    }
+                    c.setMediaItem(
                         MediaItem.fromUri("android.resource://${context.packageName}/${R.raw.sample}")
                     )
-                    player.prepare()
-                    player.play()
+                    c.prepare()
+                    c.play()
                     status = "Playing (local)"
                 }
             ) {
                 Text("Play")
             }
             Button(
-                onClick = { player.stop() },
+                onClick = {
+                    val c = controller
+                    if (c == null) {
+                        status = "Connecting..."
+                        return@Button
+                    }
+                    c.stop()
+                    status = "Stopped"
+                },
                 modifier = Modifier.padding(top = 16.dp)
             ) {
                 Text("Stop")
             }
             Button(
                 onClick = {
+                    val c = controller
+                    if (c == null) {
+                        status = "Connecting..."
+                        return@Button
+                    }
                     status = "Extracting..."
                     scope.launch {
                         try {
                             val url = YtdlpHelper.extractAudioUrl(context, TEST_VIDEO_URL)
                             if (url != null) {
                                 Log.d("YTDL", "URL: $url")
-                                player.setMediaItem(MediaItem.fromUri(url))
-                                player.prepare()
-                                player.play()
+                                c.setMediaItem(MediaItem.fromUri(url))
+                                c.prepare()
+                                c.play()
                                 status = "Playing"
                             } else {
                                 val msg = "extraction returned null"
