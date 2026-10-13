@@ -6,13 +6,15 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-    entities = [Song::class, Playlist::class, PlaylistSong::class],
-    version = 7,
+    entities = [Song::class, Playlist::class, PlaylistSong::class, SpeedDialSlot::class, Download::class],
+    version = 9,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun songDao(): SongDao
     abstract fun playlistDao(): PlaylistDao
+    abstract fun speedDialDao(): SpeedDialDao
+    abstract fun downloadDao(): DownloadDao
 
     companion object {
         @Volatile private var INSTANCE: AppDatabase? = null

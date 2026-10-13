@@ -16,6 +16,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +33,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -57,6 +60,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -66,11 +71,30 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.sharl.musicapp.data.AuthRepository
+import com.sharl.musicapp.data.Download
+import com.sharl.musicapp.data.DownloadRepository
+import com.sharl.musicapp.data.FriendsRepository
+import com.sharl.musicapp.data.ImportPreview
+import com.sharl.musicapp.data.ImportRepository
+import com.sharl.musicapp.data.ImportSource
+import com.sharl.musicapp.data.ImportState
+import com.sharl.musicapp.data.ImportTrack
+import com.sharl.musicapp.data.NewDrop
+import com.sharl.musicapp.data.NewDropsRepository
+import com.sharl.musicapp.data.NowPlaying
 import com.sharl.musicapp.data.Playlist
 import com.sharl.musicapp.data.PlaylistRepository
 import com.sharl.musicapp.data.PlaylistSong
+import com.sharl.musicapp.data.Profile
+import com.sharl.musicapp.data.ProfileRepository
+import com.sharl.musicapp.data.SettingsRepo
+import com.sharl.musicapp.data.SharedPlaylistSong
 import com.sharl.musicapp.data.Song
 import com.sharl.musicapp.data.SongRepository
+import com.sharl.musicapp.data.SpeedDialRepository
+import com.sharl.musicapp.data.SpeedDialSlot
+import com.sharl.musicapp.ui.GoogleSignInButton
 import com.sharl.musicapp.ui.theme.AccentOptions
 import com.sharl.musicapp.ui.theme.DefaultAccent
 import com.sharl.musicapp.ui.theme.MusicAppTheme
@@ -128,7 +152,8 @@ fun PlayerScreen(
         repo.songsByArtist(it, 10)
     } ?: kotlinx.coroutines.flow.flowOf(emptyList())).collectAsState(initial = emptyList())
     var tab by remember { mutableStateOf(0) }  // 0 = Home, 1 = Search, 2 = Library, 3 = For You
-    var libraryTab by remember { mutableStateOf(0) }  // 0 = Playlists, 1 = Favorites
+    var libraryTab by remember { mutableStateOf(0) }  // 0 = Downloads, 1 = Playlists, 2 = Favorites
+    var libraryLayout by remember { mutableStateOf(0) }  // 0 = List, 1 = Grid
     var showColorPicker by remember { mutableStateOf(false) }
     var menuSong by remember { mutableStateOf<Song?>(null) }
 
@@ -178,6 +203,158 @@ fun PlayerScreen(
     var showDeletePlaylistConfirm by remember { mutableStateOf(false) }
     var playlistMenuSong by remember { mutableStateOf<PlaylistSong?>(null) }
     var playlistMenuPlaylistId by remember { mutableStateOf<Long?>(null) }
+
+    val speedDialRepo = remember { SpeedDialRepository(context) }
+    val speedDialSlots by speedDialRepo.allSlots().collectAsState(initial = emptyList())
+    var speedDialMenuPosition by remember { mutableStateOf<Int?>(null) }
+    var speedDialAssignPosition by remember { mutableStateOf<Int?>(null) }  // for song picker
+    var speedDialPickerSource by remember { mutableStateOf<String?>(null) }  // "favorites" | "recent"
+
+    val downloadRepo = remember { DownloadRepository(context) }
+    val downloads by downloadRepo.all().collectAsState(initial = emptyList())
+    val downloadIds by downloadRepo.allIds().collectAsState(initial = emptyList())
+    val downloadStates by Downloader.states.collectAsState()
+    val settings = remember { SettingsRepo(context) }
+    var storageExternalState by remember { mutableStateOf(settings.storageExternal) }
+    var showSettings by remember { mutableStateOf(false) }
+    var playlistListMenu by remember { mutableStateOf<Playlist?>(null) }
+    var playlistListSongCount by remember { mutableStateOf(0) }
+    var playlistListDownloaded by remember { mutableStateOf(0) }
+    var showRemoveAllDownloads by remember { mutableStateOf(false) }
+
+    val newDropsRepo = remember { NewDropsRepository(context) }
+    val newDrops by newDropsRepo.drops.collectAsState()
+    val newDropsLoading by newDropsRepo.loading.collectAsState()
+    var showNewDropsAll by remember { mutableStateOf(false) }
+
+    // seed artists: top-played (SongDao) ∪ favorites' artists
+    val newDropsSeedArtists by remember {
+        androidx.compose.runtime.derivedStateOf {
+            val top = forYouTop.sortedByDescending { it.playCount }.take(10).map { it.artist }
+            val favs = favorites.map { it.artist }
+            (top + favs).map { it.trim() }.filter { it.isNotEmpty() }
+                .distinctBy { it.lowercase() }.take(20)
+        }
+    }
+
+    // Keyed on the seed list (not Unit) so a cold start still fires once Room's
+    // flows have emitted the played/favorite artists.
+    androidx.compose.runtime.LaunchedEffect(newDropsSeedArtists, newDropsLoading) {
+        if (newDropsSeedArtists.isNotEmpty() && newDropsRepo.isStale() && !newDropsLoading) {
+            newDropsRepo.refresh(context, newDropsSeedArtists)
+        }
+    }
+
+    val importRepo = remember { ImportRepository(context) }
+    val importState by importRepo.state.collectAsState()
+    var showImport by remember { mutableStateOf(false) }
+
+    // --- Sync with friends (Phase 14). Local-only when signed out. ---
+    val authRepo = remember { AuthRepository() }
+    val profileRepo = remember { ProfileRepository(authRepo) }
+    val friendsRepo = remember { FriendsRepository(authRepo) }
+    val session by authRepo.session.collectAsState(initial = null)
+    val signedIn = session != null
+    var showSignIn by remember { mutableStateOf(false) }
+    var myProfile by remember { mutableStateOf<Profile?>(null) }
+    var friendsList by remember { mutableStateOf<List<Profile>>(emptyList()) }
+    var friendsLoading by remember { mutableStateOf(false) }
+    var friendsError by remember { mutableStateOf<String?>(null) }
+    var addFriendCode by remember { mutableStateOf("") }
+    var addFriendStatus by remember { mutableStateOf<String?>(null) }
+    var selectedFriend by remember { mutableStateOf<Profile?>(null) }
+    var selectedFriendSongs by remember { mutableStateOf<List<SharedPlaylistSong>>(emptyList()) }
+    var selectedFriendSongsLoading by remember { mutableStateOf(false) }
+    var friendsNowPlaying by remember { mutableStateOf<List<NowPlaying>>(emptyList()) }
+    var nowPlayingFriend by remember { mutableStateOf<NowPlaying?>(null) }
+    var playlistListIsShared by remember { mutableStateOf(false) }
+
+    androidx.compose.runtime.LaunchedEffect(signedIn) {
+        if (signedIn) {
+            friendsLoading = true
+            friendsError = null
+            runCatching { profileRepo.ensureProfile() }
+                .onFailure { friendsError = it.message }
+                .getOrNull()?.let { myProfile = it }
+            runCatching { profileRepo.friends() }
+                .onSuccess { friendsList = it }
+                .onFailure { friendsError = it.message }
+            friendsLoading = false
+        } else {
+            myProfile = null
+            friendsList = emptyList()
+            friendsNowPlaying = emptyList()
+            selectedFriend = null
+        }
+    }
+
+    // Realtime subscription for friends' now-playing. One channel for the whole
+    // screen (the Home strip and Friends screen both read this state).
+    androidx.compose.runtime.LaunchedEffect(signedIn, friendsList) {
+        if (signedIn && friendsList.isNotEmpty()) {
+            friendsRepo.observeFriendsNowPlaying(friendsList.map { it.id })
+                .collect { friendsNowPlaying = it }
+        } else {
+            friendsNowPlaying = emptyList()
+        }
+    }
+
+    // Debounced now-playing push. Uses the queue (not playFromQueue) so that
+    // helper is untouched.
+    androidx.compose.runtime.LaunchedEffect(signedIn, queueIndex, nowPlayingTitle) {
+        if (signedIn && nowPlayingTitle != null) {
+            kotlinx.coroutines.delay(5000)
+            val vid = queue.getOrNull(queueIndex)?.videoId
+            runCatching { friendsRepo.updateNowPlaying(vid, nowPlayingTitle, nowPlayingArtist) }
+        }
+    }
+
+    androidx.compose.runtime.LaunchedEffect(forYouRecent) {
+        if (forYouRecent.isNotEmpty()) {
+            speedDialRepo.seedIfEmpty(forYouRecent)
+        }
+    }
+
+    androidx.compose.runtime.LaunchedEffect(playlistListMenu, downloadIds) {
+        val pl = playlistListMenu
+        if (pl != null) {
+            val songs = playlistRepo.songs(pl.id).first()
+            playlistListSongCount = songs.size
+            playlistListDownloaded = songs.count { downloadIds.contains(it.videoId) }
+            playlistListIsShared = if (signedIn && authRepo.configured) {
+                runCatching { friendsRepo.mySharedPlaylist()?.playlistName == pl.name }
+                    .getOrDefault(false)
+            } else false
+        }
+    }
+
+    fun startDownload(
+        videoId: String,
+        title: String,
+        artist: String,
+        thumb: String?,
+        durationMs: Long
+    ) {
+        scope.launch {
+            try {
+                Downloader.download(context, settings, videoId, title, artist, thumb, durationMs)
+            } catch (e: Exception) {
+                status = "Download failed: ${e.message}"
+            }
+        }
+    }
+
+    fun removeAllDownloads() {
+        scope.launch {
+            downloads.forEach { d ->
+                try {
+                    Downloader.remove(context, d)
+                } catch (e: Exception) {
+                    Log.w("DOWNLOAD", "remove failed for ${d.videoId}", e)
+                }
+            }
+        }
+    }
 
     DisposableEffect(context) {
         Log.d("CTRL", "Connecting to PlaybackService...")
@@ -240,6 +417,19 @@ fun PlayerScreen(
     }
 
     suspend fun extractOrCache(videoId: String): Pair<String, SongMetadata>? {
+        // Offline short-circuit: a downloaded song resolves to its local file,
+        // no network / no yt-dlp re-extraction.
+        downloadRepo.get(videoId)?.let { row ->
+            val f = java.io.File(row.filePath)
+            if (f.exists()) {
+                return android.net.Uri.fromFile(f).toString() to SongMetadata(
+                    title = row.title,
+                    artist = row.artist,
+                    album = null,
+                    thumbnailUrl = row.thumbnailUrl
+                )
+            }
+        }
         urlCache[videoId]?.let {
             urlCache.remove(videoId)
             return it
@@ -304,7 +494,10 @@ fun PlayerScreen(
                 val nextIndex = index + 1
                 if (nextIndex in items.indices) {
                     val nextId = items[nextIndex].videoId
-                    if (!urlCache.containsKey(nextId) && pendingExtraction != nextId) {
+                    val nextDownloaded = downloadRepo.get(nextId)?.let {
+                        java.io.File(it.filePath).exists()
+                    } ?: false
+                    if (!urlCache.containsKey(nextId) && pendingExtraction != nextId && !nextDownloaded) {
                         pendingExtraction = nextId
                         scope.launch {
                             try {
@@ -370,6 +563,41 @@ fun PlayerScreen(
         val insertAt = queueIndex + 1
         queue = queue.toMutableList().apply { add(insertAt, item) }
         status = "Playing next: ${song.title}"
+    }
+
+    fun onSpeedDialTap(slot: SpeedDialSlot?, position: Int) {
+        if (slot == null || slot.type == "empty") {
+            speedDialMenuPosition = position
+            return
+        }
+        when (slot.type) {
+            "song" -> {
+                slot.refId?.let { vid ->
+                    playFromQueue(listOf(QueueItem(vid, slot.title ?: "")), 0)
+                }
+            }
+            "playlist" -> {
+                val pid = slot.refId?.toLongOrNull() ?: return
+                scope.launch {
+                    val songs = playlistRepo.songs(pid).first()
+                    if (songs.isNotEmpty()) {
+                        playFromQueue(songs.map { QueueItem(it.videoId, it.title) }, 0)
+                    }
+                }
+            }
+            "shuffle_fav" -> {
+                val shuffled = favorites.shuffled()
+                if (shuffled.isNotEmpty()) {
+                    playFromQueue(shuffled.map { QueueItem(it.videoId, it.title) }, 0)
+                }
+            }
+            "shuffle_recent" -> {
+                val shuffled = forYouRecent.shuffled()
+                if (shuffled.isNotEmpty()) {
+                    playFromQueue(shuffled.map { QueueItem(it.videoId, it.title) }, 0)
+                }
+            }
+        }
     }
 
     fun toggleVideoMode() {
@@ -456,7 +684,8 @@ fun PlayerScreen(
                 onSongMenu = { ps ->
                     playlistMenuSong = ps
                     playlistMenuPlaylistId = openPlaylistId
-                }
+                },
+                onPlaylistMenu = { pl -> playlistListMenu = pl }
             )
         } else if (showNowPlaying && nowPlayingTitle != null) {
             androidx.activity.compose.BackHandler(enabled = true) {
@@ -517,6 +746,114 @@ fun PlayerScreen(
                     }
                 }
             )
+        } else if (showSettings) {
+            androidx.activity.compose.BackHandler(enabled = true) {
+                showSettings = false
+            }
+            SettingsScreen(
+                storageExternal = storageExternalState,
+                onStorageChange = { ext ->
+                    storageExternalState = ext
+                    settings.storageExternal = ext
+                },
+                downloadDirPath = settings.downloadDir(context).absolutePath,
+                downloadCount = downloads.size,
+                totalBytes = downloads.sumOf { it.fileSizeBytes },
+                onRemoveAll = { showRemoveAllDownloads = true },
+                onBack = { showSettings = false },
+                signedIn = signedIn,
+                syncConfigured = authRepo.configured,
+                accountEmail = authRepo.currentUserEmail(),
+                inviteCode = myProfile?.inviteCode,
+                onSignIn = { showSignIn = true },
+                onSignOut = {
+                    scope.launch { runCatching { authRepo.signOut() } }
+                },
+                onCopyInvite = {
+                    val code = myProfile?.inviteCode
+                    if (!code.isNullOrBlank()) {
+                        val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                            as android.content.ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("Invite code", code))
+                        addFriendStatus = "Invite code copied."
+                    }
+                },
+                friends = friendsList,
+                addFriendCode = addFriendCode,
+                onAddFriendCodeChange = { addFriendCode = it; addFriendStatus = null },
+                onAddFriend = {
+                    scope.launch {
+                        addFriendStatus = "Adding…"
+                        profileRepo.addFriendByCode(addFriendCode)
+                            .onSuccess {
+                                addFriendStatus = "Friend added."
+                                addFriendCode = ""
+                                friendsList = runCatching { profileRepo.friends() }
+                                    .getOrDefault(friendsList)
+                            }
+                            .onFailure { addFriendStatus = it.message ?: "Could not add friend." }
+                    }
+                },
+                addFriendStatus = addFriendStatus
+            )
+        } else if (showNewDropsAll) {
+            androidx.activity.compose.BackHandler(enabled = true) {
+                showNewDropsAll = false
+            }
+            NewDropsScreen(
+                drops = newDrops,
+                loading = newDropsLoading,
+                downloadIds = downloadIds,
+                onBack = { showNewDropsAll = false },
+                onRefresh = {
+                    scope.launch {
+                        if (newDropsSeedArtists.isNotEmpty()) {
+                            newDropsRepo.refresh(context, newDropsSeedArtists)
+                        }
+                    }
+                },
+                onPlay = { drop -> playFromQueue(listOf(QueueItem(drop.videoId, drop.title)), 0) },
+                onLongClick = { drop -> menuSong = drop.asSong() },
+                onToggleFavorite = { drop ->
+                    scope.launch { repo.toggleFavorite(drop.asSong()) }
+                }
+            )
+        } else if (showImport) {
+            androidx.activity.compose.BackHandler(enabled = true) {
+                importRepo.reset()
+                showImport = false
+            }
+            ImportScreen(
+                state = importState,
+                onSourceChosen = { src -> scope.launch { importRepo.preview(src) } },
+                onConfirm = { preview -> scope.launch { importRepo.commit(preview) } },
+                onOpenPlaylist = { playlistId ->
+                    importRepo.reset()
+                    showImport = false
+                    tab = 2
+                    libraryTab = 1
+                    openPlaylistId = playlistId
+                },
+                onDismiss = {
+                    importRepo.reset()
+                    showImport = false
+                }
+            )
+        } else if (showSignIn) {
+            androidx.activity.compose.BackHandler(enabled = true) { showSignIn = false }
+            SignInScreen(
+                configured = authRepo.configured,
+                externalError = friendsError,
+                onSignIn = { idToken, nonce ->
+                    friendsError = null
+                    scope.launch {
+                        runCatching { authRepo.signInWithGoogle(idToken, nonce) }
+                            .onSuccess { showSignIn = false }
+                            .onFailure { friendsError = it.message ?: "Sign-in failed." }
+                    }
+                },
+                onBack = { showSignIn = false }
+            )
         } else {
         Row(
             modifier = Modifier
@@ -566,8 +903,11 @@ fun PlayerScreen(
 
         when (tab) {
             0 -> {
-                val quickPicks = if (forYouTop.isNotEmpty()) forYouTop.take(6)
-                                 else forYouRecent.take(6)
+                val quickPicks30 = androidx.compose.runtime.remember(forYouTop, forYouRecent) {
+                    val combined = (forYouTop + forYouRecent).distinctBy { it.videoId }
+                    combined.take(30)
+                }
+                val quickPickPages = (quickPicks30.size + 5) / 6
                 LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -575,65 +915,189 @@ fun PlayerScreen(
                             .padding(top = 8.dp)
                     ) {
                         item {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
+                            if (quickPicks30.isNotEmpty()) {
                                 Text(
                                     "Quick picks",
                                     style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
-                                    modifier = Modifier.weight(1f)
+                                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp)
                                 )
-                                androidx.compose.material3.OutlinedButton(
-                                    onClick = {
-                                        if (quickPicks.isNotEmpty()) {
-                                            playFromQueue(
-                                                quickPicks.map { QueueItem(it.videoId, it.title) },
-                                                0
-                                            )
+                                val quickPagerState = androidx.compose.foundation.pager.rememberPagerState(
+                                    pageCount = { quickPickPages }
+                                )
+                                androidx.compose.foundation.pager.HorizontalPager(
+                                    state = quickPagerState,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) { page ->
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        val start = page * 6
+                                        val pageItems = quickPicks30.drop(start).take(6)
+                                        pageItems.forEach { song ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable {
+                                                        playFromQueue(
+                                                            quickPicks30.map { QueueItem(it.videoId, it.title) },
+                                                            quickPicks30.indexOf(song)
+                                                        )
+                                                    }
+                                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), 56.dp)
+                                                Spacer(Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(song.title, maxLines = 2,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface)
+                                                    Text(
+                                                        "${song.artist} · ${song.playCount} " +
+                                                        if (song.playCount == 1) "play" else "plays",
+                                                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                }
+                                                if (downloadIds.contains(song.videoId)) {
+                                                    Text(
+                                                        "✓",
+                                                        color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                                                        style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                                                        modifier = Modifier.padding(end = 2.dp)
+                                                    )
+                                                }
+                                                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                                                    IconButton(onClick = { menuSong = song }) {
+                                                        Text("⋮", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                                                    }
+                                                }
+                                            }
                                         }
-                                    },
-                                    shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp)
-                                ) { Text("Play all") }
+                                    }
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    repeat(quickPickPages) { idx ->
+                                        Box(
+                                            modifier = Modifier
+                                                .padding(horizontal = 3.dp)
+                                                .size(if (idx == quickPagerState.currentPage) 8.dp else 6.dp)
+                                                .background(
+                                                    if (idx == quickPagerState.currentPage)
+                                                        androidx.compose.material3.MaterialTheme.colorScheme.primary
+                                                    else
+                                                        androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                                    androidx.compose.foundation.shape.CircleShape
+                                                )
+                                        )
+                                    }
+                                }
                             }
                         }
 
-                        items(quickPicks, key = { "qp_${it.videoId}" }) { song ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        playFromQueue(
-                                            quickPicks.map { QueueItem(it.videoId, it.title) },
-                                            quickPicks.indexOf(song)
+                        item {
+                            if (signedIn && friendsNowPlaying.isNotEmpty()) {
+                                FriendsStrip(
+                                    items = friendsNowPlaying,
+                                    friends = friendsList,
+                                    onClick = { nowPlayingFriend = it }
+                                )
+                            }
+                        }
+
+                        item {
+                            if (newDrops.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth()
+                                        .padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "New drops",
+                                        style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (newDropsLoading) {
+                                        androidx.compose.material3.CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp
                                         )
                                     }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), 56.dp)
-                                Spacer(Modifier.width(12.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        song.title,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Text(
-                                        "${song.artist} · ${song.playCount} ${if (song.playCount == 1) "play" else "plays"}",
-                                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                    androidx.compose.material3.TextButton(
+                                        onClick = { showNewDropsAll = true }
+                                    ) { Text("See all") }
                                 }
-                                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                                    IconButton(onClick = { menuSong = song }) {
-                                        Text("⋮", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                                HorizontalCarousel(
+                                    items = newDrops.take(20),
+                                    key = { it.videoId }
+                                ) { drop ->
+                                    NewDropCard(drop) {
+                                        playFromQueue(listOf(QueueItem(drop.videoId, drop.title)), 0)
                                     }
+                                }
+                            }
+                        }
+
+                        item {
+                            Text(
+                                "Speed Dial",
+                                style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
+                                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp)
+                            )
+                            val dialPagerState = androidx.compose.foundation.pager.rememberPagerState(
+                                pageCount = { 5 }
+                            )
+                            androidx.compose.foundation.pager.HorizontalPager(
+                                state = dialPagerState,
+                                modifier = Modifier.fillMaxWidth()
+                            ) { page ->
+                                val startPos = page * 9
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+                                ) {
+                                    for (row in 0 until 3) {
+                                        Row(modifier = Modifier.fillMaxWidth()) {
+                                            for (col in 0 until 3) {
+                                                val position = startPos + row * 3 + col
+                                                val slot = speedDialSlots.firstOrNull { it.position == position }
+                                                Box(
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .aspectRatio(1f)
+                                                        .padding(6.dp)
+                                                ) {
+                                                    SpeedDialTile(
+                                                        slot = slot,
+                                                        onClick = { onSpeedDialTap(slot, position) },
+                                                        onLongClick = { speedDialMenuPosition = position },
+                                                        showDownloaded = slot?.type == "song" &&
+                                                            slot.refId != null &&
+                                                            downloadIds.contains(slot.refId)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                repeat(5) { idx ->
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(horizontal = 3.dp)
+                                            .size(if (idx == dialPagerState.currentPage) 8.dp else 6.dp)
+                                            .background(
+                                                if (idx == dialPagerState.currentPage)
+                                                    androidx.compose.material3.MaterialTheme.colorScheme.primary
+                                                else
+                                                    androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                                androidx.compose.foundation.shape.CircleShape
+                                            )
+                                    )
                                 }
                             }
                         }
@@ -750,41 +1214,37 @@ fun PlayerScreen(
             }
             1 -> {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedTextField(
+                    androidx.compose.material3.OutlinedTextField(
                         value = query,
                         onValueChange = { query = it },
-                        label = { Text("Search YouTube") },
+                        placeholder = { Text("Search songs, artists…") },
                         singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Button(
-                        onClick = {
-                            val q = query.trim()
-                            if (q.isEmpty()) {
-                                status = "Error: empty query"
-                                return@Button
-                            }
-                            status = "Searching..."
-                            scope.launch {
-                                try {
-                                    val found = YtdlpHelper.searchYouTube(context, q, 5)
-                                    results = found
-                                    status = "Found ${found.size} results"
-                                } catch (e: Exception) {
-                                    val msg = e.message ?: "unknown error"
-                                    Log.e("YTDL", "Search failed: $msg")
-                                    status = "Error: $msg"
-                                    Toast.makeText(context, "Search failed: $msg", Toast.LENGTH_LONG).show()
+                        leadingIcon = {
+                            Text("🔍",
+                                style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.padding(start = 12.dp))
+                        },
+                        trailingIcon = {
+                            if (query.isNotEmpty()) {
+                                IconButton(onClick = { query = "" }) {
+                                    Text("✕", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
                                 }
                             }
                         },
-                        modifier = Modifier.padding(start = 8.dp)
-                    ) {
-                        Text("Search")
-                    }
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
+                        colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant,
+                            focusedContainerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface,
+                            unfocusedContainerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
 
                 LaunchedEffect(query) {
@@ -795,7 +1255,7 @@ fun PlayerScreen(
                         return@LaunchedEffect
                     }
                     if (trimmed.length < 2) return@LaunchedEffect
-                    kotlinx.coroutines.delay(600)
+                    kotlinx.coroutines.delay(400)
                     isSearching = true
                     try {
                         val found = YtdlpHelper.searchYouTube(context, trimmed, 5)
@@ -819,12 +1279,24 @@ fun PlayerScreen(
                 }
 
                 if (isSearching) {
-                    Text(
-                        text = "Searching…",
-                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 12.dp, top = 4.dp)
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Searching…",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
 
                 LazyColumn(
@@ -833,13 +1305,22 @@ fun PlayerScreen(
                         .weight(1f)
                         .padding(top = 8.dp)
                 ) {
+                    if (query.isBlank()) {
+                        item {
+                            Text(
+                                "Search YouTube for any song, or find it in your library.",
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        }
+                    }
                     if (localMatches.isNotEmpty()) {
                         item {
                             Text(
                                 "In your library",
-                                style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
-                                color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.padding(start = 12.dp, top = 8.dp, bottom = 4.dp)
+                                style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 8.dp)
                             )
                         }
                         items(localMatches, key = { it.videoId }) { song ->
@@ -852,16 +1333,17 @@ fun PlayerScreen(
                                     )
                                 },
                                 onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } },
-                                onLongClick = { menuSong = song }
+                                onLongClick = { menuSong = song },
+                                showDownloaded = downloadIds.contains(song.videoId)
                             )
                         }
                         item { HorizontalDivider() }
                         item {
                             Text(
                                 "From YouTube",
-                                style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
-                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(start = 12.dp, top = 12.dp, bottom = 4.dp)
+                                style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 8.dp)
                             )
                         }
                     }
@@ -892,6 +1374,15 @@ fun PlayerScreen(
                         )
                         HorizontalDivider()
                     }
+                    if (!isSearching && query.trim().length >= 2 && localMatches.isEmpty() && results.isEmpty()) {
+                        item {
+                            Text(
+                                "No results.",
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        }
+                    }
                 }
             }
             2 -> {
@@ -903,23 +1394,85 @@ fun PlayerScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         FilterChip(
                             selected = libraryTab == 0,
                             onClick = { libraryTab = 0 },
-                            label = { Text("Playlists") }
+                            label = { Text("Downloads") }
                         )
                         Spacer(Modifier.width(8.dp))
                         FilterChip(
                             selected = libraryTab == 1,
                             onClick = { libraryTab = 1 },
+                            label = { Text("Playlists") }
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        FilterChip(
+                            selected = libraryTab == 2,
+                            onClick = { libraryTab = 2 },
                             label = { Text("Favorites") }
                         )
+                        Spacer(Modifier.width(8.dp))
+                        FilterChip(
+                            selected = libraryTab == 3,
+                            onClick = { libraryTab = 3 },
+                            label = { Text("Friends") }
+                        )
+                        Spacer(Modifier.weight(1f))
+                        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                            IconButton(onClick = { importRepo.reset(); showImport = true }) {
+                                Text(
+                                    "⤓",
+                                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                            IconButton(onClick = { showSettings = true }) {
+                                Text(
+                                    "⚙",
+                                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                            IconButton(onClick = { libraryLayout = if (libraryLayout == 0) 1 else 0 }) {
+                                Text(
+                                    if (libraryLayout == 0) "▦" else "☰",
+                                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
                     }
 
                     when (libraryTab) {
                         0 -> Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                        ) {
+                            DownloadsScreen(
+                                downloads = downloads,
+                                downloadStates = downloadStates,
+                                onPlay = { index ->
+                                    playFromQueue(
+                                        downloads.map { QueueItem(it.videoId, it.title) },
+                                        index
+                                    )
+                                },
+                                onRemove = { d ->
+                                    scope.launch { Downloader.remove(context, d) }
+                                },
+                                onRemoveAll = { showRemoveAllDownloads = true },
+                                onFindMusic = { tab = 1 }
+                            )
+                        }
+                        1 -> Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .weight(1f)
@@ -944,10 +1497,11 @@ fun PlayerScreen(
                                 onSongMenu = { ps ->
                                     playlistMenuSong = ps
                                     playlistMenuPlaylistId = openPlaylistId
-                                }
+                                },
+                                onPlaylistMenu = { pl -> playlistListMenu = pl }
                             )
                         }
-                        1 -> {
+                        2 -> {
                             if (favorites.isEmpty()) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
@@ -955,7 +1509,7 @@ fun PlayerScreen(
                                         modifier = Modifier.padding(top = 8.dp)
                                     )
                                 }
-                            } else {
+                            } else if (libraryLayout == 0) {
                                 LazyColumn(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -968,11 +1522,90 @@ fun PlayerScreen(
                                             song = song,
                                             onClick = { playFromQueue(items, idx) },
                                             onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } },
-                                            onLongClick = { menuSong = song }
+                                            onLongClick = { menuSong = song },
+                                            showDownloaded = downloadIds.contains(song.videoId)
                                         )
                                     }
                                 }
+                            } else {
+                                androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
+                                    columns = androidx.compose.foundation.lazy.grid.GridCells.Fixed(2),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp)
+                                ) {
+                                    items(favorites, key = { it.videoId }) { song ->
+                                        Column(
+                                            modifier = Modifier
+                                                .padding(8.dp)
+                                                .clickable {
+                                                    playFromQueue(
+                                                        favorites.map { QueueItem(it.videoId, it.title) },
+                                                        favorites.indexOf(song)
+                                                    )
+                                                }
+                                        ) {
+                                            Thumbnail(
+                                                song.thumbnailUrl ?: youtubeThumb(song.videoId),
+                                                160.dp
+                                            )
+                                            Spacer(Modifier.height(8.dp))
+                                            Text(
+                                                song.title,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                song.artist,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
                             }
+                        }
+                        3 -> Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                        ) {
+                            FriendsScreen(
+                                configured = authRepo.configured,
+                                signedIn = signedIn,
+                                friends = friendsList,
+                                loading = friendsLoading,
+                                error = friendsError,
+                                selectedFriend = selectedFriend,
+                                friendSongs = selectedFriendSongs,
+                                friendSongsLoading = selectedFriendSongsLoading,
+                                onBack = { selectedFriend = null },
+                                onBackToList = { selectedFriend = null },
+                                onOpenFriend = { f ->
+                                    selectedFriend = f
+                                    selectedFriendSongs = emptyList()
+                                    selectedFriendSongsLoading = true
+                                    scope.launch {
+                                        selectedFriendSongs = runCatching {
+                                            val shared = friendsRepo.friendsPlaylists(listOf(f.id)).firstOrNull()
+                                            if (shared?.id != null) friendsRepo.songsOf(shared.id) else emptyList()
+                                        }.getOrDefault(emptyList())
+                                        selectedFriendSongsLoading = false
+                                    }
+                                },
+                                onPlayFriendSongs = { idx ->
+                                    playFromQueue(
+                                        selectedFriendSongs.map { QueueItem(it.videoId, it.title ?: "") },
+                                        idx
+                                    )
+                                },
+                                onSignIn = { showSignIn = true }
+                            )
                         }
                     }
                 }
@@ -987,7 +1620,13 @@ fun PlayerScreen(
                     .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Thumbnail(nowPlayingThumbnail, 40.dp)
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
+                ) {
+                    Thumbnail(nowPlayingThumbnail, 56.dp)
+                }
                 Spacer(Modifier.width(8.dp))
                 Column(
                     modifier = Modifier
@@ -1006,30 +1645,55 @@ fun PlayerScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                androidx.compose.material3.IconButton(onClick = { playPrev() }) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clickable { playPrev() },
+                    contentAlignment = Alignment.Center
+                ) {
                     Text("⏮", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
                 }
-                androidx.compose.material3.IconButton(
-                    onClick = {
-                        val c = controller ?: return@IconButton
-                        if (c.isPlaying) {
-                            c.pause()
-                            isPlaying = false
-                        } else {
-                            c.play()
-                            isPlaying = true
-                        }
-                    }
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clickable {
+                            val c = controller ?: return@clickable
+                            if (c.isPlaying) {
+                                c.pause()
+                                isPlaying = false
+                            } else {
+                                c.play()
+                                isPlaying = true
+                            }
+                        },
+                    contentAlignment = Alignment.Center
                 ) {
                     Text(
                         if (isPlaying) "⏸" else "▶",
                         style = androidx.compose.material3.MaterialTheme.typography.titleLarge
                     )
                 }
-                androidx.compose.material3.IconButton(onClick = { playNext() }) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clickable { playNext() },
+                    contentAlignment = Alignment.Center
+                ) {
                     Text("⏭", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
                 }
             }
+            val progress = if (currentDurationMs > 0)
+                (currentPosMs.toFloat() / currentDurationMs.toFloat()).coerceIn(0f, 1f)
+            else 0f
+            androidx.compose.material3.LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(2.dp),
+                color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                trackColor = androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant,
+                drawStopIndicator = {}
+            )
         }
 
         NavigationBar(
@@ -1155,9 +1819,71 @@ fun PlayerScreen(
                         scope.launch { repo.toggleFavorite(song) }
                         menuSong = null
                     }
+                    val songDlState = downloadStates[song.videoId]
+                    when {
+                        songDlState is DownloadState.Downloading ->
+                            MenuItem("Downloading… ${songDlState.percent}%") { }
+                        songDlState is DownloadState.Queued ->
+                            MenuItem("Queued…") { }
+                        downloadIds.contains(song.videoId) ->
+                            MenuItem("Remove download") {
+                                scope.launch {
+                                    downloadRepo.get(song.videoId)?.let {
+                                        Downloader.remove(context, it)
+                                    }
+                                }
+                                menuSong = null
+                            }
+                        songDlState is DownloadState.Failed ->
+                            MenuItem("Retry download") {
+                                startDownload(
+                                    song.videoId, song.title, song.artist,
+                                    song.thumbnailUrl, 0L
+                                )
+                                menuSong = null
+                            }
+                        else ->
+                            MenuItem("Download") {
+                                startDownload(
+                                    song.videoId, song.title, song.artist,
+                                    song.thumbnailUrl, 0L
+                                )
+                                menuSong = null
+                            }
+                    }
                     MenuItem("Not interested") {
                         scope.launch { repo.hide(song) }
                         menuSong = null
+                    }
+                }
+            }
+        }
+
+        nowPlayingFriend?.let { np ->
+            androidx.compose.material3.ModalBottomSheet(
+                onDismissRequest = { nowPlayingFriend = null }
+            ) {
+                Column(modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
+                    val who = friendsList.firstOrNull { it.id == np.userId }
+                    Text(
+                        (who?.displayName ?: who?.email ?: "A friend") + " is listening to",
+                        style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Thumbnail(np.videoId?.let { youtubeThumb(it) }, 48.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(np.title ?: "", maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                np.artist ?: "",
+                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
             }
@@ -1345,6 +2071,192 @@ fun PlayerScreen(
                 }
             }
         }
+
+        val sdPos = speedDialMenuPosition
+        if (sdPos != null) {
+            val existing = speedDialSlots.firstOrNull { it.position == sdPos }
+            androidx.compose.material3.ModalBottomSheet(
+                onDismissRequest = { speedDialMenuPosition = null }
+            ) {
+                Column(modifier = Modifier.padding(bottom = 24.dp)) {
+                    Text(
+                        "Slot ${sdPos + 1}",
+                        style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(16.dp)
+                    )
+                    HorizontalDivider()
+
+                    MenuItem("Shuffle Favorites") {
+                        scope.launch { speedDialRepo.assignShuffleFavorites(sdPos) }
+                        speedDialMenuPosition = null
+                    }
+                    MenuItem("Shuffle Recently Played") {
+                        scope.launch { speedDialRepo.assignShuffleRecent(sdPos) }
+                        speedDialMenuPosition = null
+                    }
+                    MenuItem("Choose from Favorites") {
+                        speedDialPickerSource = "favorites"
+                        speedDialAssignPosition = sdPos
+                        speedDialMenuPosition = null
+                    }
+                    MenuItem("Choose from Recently Played") {
+                        speedDialPickerSource = "recent"
+                        speedDialAssignPosition = sdPos
+                        speedDialMenuPosition = null
+                    }
+                    if (existing != null && existing.type != "empty") {
+                        MenuItem("Remove") {
+                            scope.launch { speedDialRepo.clear(sdPos) }
+                            speedDialMenuPosition = null
+                        }
+                    }
+                }
+            }
+        }
+
+        val assignPos = speedDialAssignPosition
+        if (assignPos != null) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = {
+                    speedDialAssignPosition = null
+                    speedDialPickerSource = null
+                },
+                title = { Text("Pick a song") },
+                text = {
+                    val choices = when (speedDialPickerSource) {
+                        "favorites" -> favorites.take(20)
+                        "recent" -> forYouRecent.take(20)
+                        else -> (forYouTop + forYouRecent).distinctBy { it.videoId }.take(20)
+                    }
+                    androidx.compose.foundation.lazy.LazyColumn(
+                        modifier = Modifier.heightIn(max = 400.dp)
+                    ) {
+                        items(choices, key = { it.videoId }) { song ->
+                            androidx.compose.material3.TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        speedDialRepo.assignSong(
+                                            assignPos,
+                                            song.videoId,
+                                            song.title,
+                                            song.thumbnailUrl ?: youtubeThumb(song.videoId)
+                                        )
+                                    }
+                                    speedDialAssignPosition = null
+                                    speedDialPickerSource = null
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(song.title, maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.fillMaxWidth())
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        speedDialAssignPosition = null
+                        speedDialPickerSource = null
+                    }) { Text("Cancel") }
+                }
+            )
+        }
+
+        val plMenu = playlistListMenu
+        if (plMenu != null) {
+            androidx.compose.material3.ModalBottomSheet(
+                onDismissRequest = { playlistListMenu = null }
+            ) {
+                Column(modifier = Modifier.padding(bottom = 24.dp)) {
+                    Text(
+                        plMenu.name,
+                        style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    )
+                    HorizontalDivider()
+
+                    MenuItem("Download all ($playlistListSongCount)") {
+                        val pid = plMenu.id
+                        scope.launch {
+                            try {
+                                val songs = playlistRepo.songs(pid).first()
+                                songs.filterNot { downloadIds.contains(it.videoId) }
+                                    .forEach { ps ->
+                                        try {
+                                            Downloader.download(
+                                                context, settings, ps.videoId, ps.title,
+                                                ps.artist, ps.thumbnailUrl, 0L
+                                            )
+                                        } catch (e: Exception) {
+                                            Log.w("DOWNLOAD", "playlist download failed ${ps.videoId}", e)
+                                        }
+                                    }
+                            } catch (e: Exception) {
+                                status = "Download all failed: ${e.message}"
+                            }
+                        }
+                        playlistListMenu = null
+                    }
+                    if (playlistListDownloaded > 0) {
+                        MenuItem("Remove downloads ($playlistListDownloaded of $playlistListSongCount)") {
+                            val pid = plMenu.id
+                            scope.launch {
+                                val songs = playlistRepo.songs(pid).first()
+                                songs.filter { downloadIds.contains(it.videoId) }
+                                    .forEach { ps ->
+                                        downloadRepo.get(ps.videoId)?.let {
+                                            Downloader.remove(context, it)
+                                        }
+                                    }
+                            }
+                            playlistListMenu = null
+                        }
+                    }
+                    if (signedIn) {
+                        if (playlistListIsShared) {
+                            MenuItem("Stop sharing") {
+                                scope.launch { runCatching { friendsRepo.stopSharing() } }
+                                playlistListIsShared = false
+                                playlistListMenu = null
+                            }
+                        } else {
+                            MenuItem("Share with friends") {
+                                val pid = plMenu.id
+                                val pname = plMenu.name
+                                scope.launch {
+                                    runCatching { friendsRepo.sharePlaylist(context, pid, pname) }
+                                        .onSuccess { playlistListIsShared = true }
+                                        .onFailure { friendsError = it.message }
+                                }
+                                playlistListMenu = null
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showRemoveAllDownloads) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showRemoveAllDownloads = false },
+                title = { Text("Remove all downloads?") },
+                text = { Text("This deletes every downloaded file. This cannot be undone.") },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        removeAllDownloads()
+                        showRemoveAllDownloads = false
+                    }) { Text("Remove all") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { showRemoveAllDownloads = false }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -1408,6 +2320,153 @@ fun RecommendationRow(
         }
     }
 }
+
+@Composable
+fun SpeedDialTile(
+    slot: com.sharl.musicapp.data.SpeedDialSlot?,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    showDownloaded: Boolean = false
+) {
+    val bg = if (slot == null || slot.type == "empty")
+        androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+    else
+        androidx.compose.material3.MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+            .background(bg)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        contentAlignment = Alignment.Center
+    ) {
+        when (slot?.type) {
+            "song" -> {
+                if (slot.thumbnailUrl != null || slot.refId != null) {
+                    Thumbnail(
+                        slot.thumbnailUrl ?: youtubeThumb(slot.refId ?: ""),
+                        200.dp  // clipped by parent
+                    )
+                }
+                // Overlay title at the bottom
+                Column(
+                    modifier = Modifier.fillMaxSize().padding(6.dp),
+                    verticalArrangement = Arrangement.Bottom
+                ) {
+                    Text(
+                        slot.title ?: "",
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+            "playlist" -> {
+                Text(
+                    slot.title ?: "Playlist",
+                    style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.padding(6.dp)
+                )
+            }
+            "shuffle_fav" -> {
+                Text(
+                    "🔀 Favorites",
+                    style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
+            "shuffle_recent" -> {
+                Text(
+                    "🔀 Recent",
+                    style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
+            else -> {
+                Text(
+                    "+",
+                    style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        if (showDownloaded) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(4.dp)
+            ) {
+                Text(
+                    "✓",
+                    style = androidx.compose.material3.MaterialTheme.typography.labelLarge,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun <T> HorizontalCarousel(
+    items: List<T>,
+    key: (T) -> Any,
+    content: @Composable (T) -> Unit
+) {
+    if (items.isEmpty()) return
+    androidx.compose.foundation.lazy.LazyRow(
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp)
+    ) {
+        this.items(items, key = key) { item -> content(item) }
+    }
+}
+
+@Composable
+fun NewDropCard(drop: NewDrop, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .width(140.dp)
+            .padding(horizontal = 4.dp)
+            .clickable { onClick() }
+    ) {
+        Box(
+            Modifier
+                .size(140.dp)
+                .clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+        ) {
+            Thumbnail(drop.thumbnailUrl ?: youtubeThumb(drop.videoId), 140.dp)
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            drop.title,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+        )
+        Text(
+            "New from ${drop.artist}",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+// Transient Song used only to reuse SongRow / the song menu for a not-yet-played drop.
+fun NewDrop.asSong(): Song = Song(
+    videoId = videoId,
+    title = title,
+    artist = artist,
+    thumbnailUrl = thumbnailUrl ?: youtubeThumb(videoId),
+    lastPlayedAt = 0L,
+    playCount = 0,
+    isFavorite = false,
+    isHidden = false
+)
 
 @Composable
 fun HorizontalCarousel(
@@ -1481,7 +2540,8 @@ fun SongRow(
     song: Song,
     onClick: () -> Unit,
     onToggleFavorite: () -> Unit,
-    onLongClick: () -> Unit
+    onLongClick: () -> Unit,
+    showDownloaded: Boolean = false
 ) {
     Row(
         modifier = Modifier
@@ -1512,6 +2572,14 @@ fun SongRow(
             Text(
                 text = subtitle,
                 style = androidx.compose.material3.MaterialTheme.typography.bodySmall
+            )
+        }
+        if (showDownloaded) {
+            Text(
+                text = "✓",
+                color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(end = 4.dp)
             )
         }
         androidx.compose.material3.IconButton(onClick = onToggleFavorite) {
@@ -2196,7 +3264,8 @@ fun PlaylistsScreen(
     playlistCreatedAt: Long,
     onRequestRename: () -> Unit,
     onRequestDelete: () -> Unit,
-    onSongMenu: (PlaylistSong) -> Unit
+    onSongMenu: (PlaylistSong) -> Unit,
+    onPlaylistMenu: (Playlist) -> Unit = {}
 ) {
     if (openPlaylistId != null) {
         val playlistSongs by remember(openPlaylistId) {
@@ -2282,12 +3351,944 @@ fun PlaylistsScreen(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
+                        Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                            IconButton(onClick = { onPlaylistMenu(pl) }) {
+                                Text(
+                                    "⋮",
+                                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge
+                                )
+                            }
+                        }
                     }
                     HorizontalDivider()
                 }
             }
         }
     }
+}
+
+@Composable
+fun ImportScreen(
+    state: ImportState,
+    onSourceChosen: (ImportSource) -> Unit,
+    onConfirm: (ImportPreview) -> Unit,
+    onOpenPlaylist: (Long) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var chosen by remember { mutableStateOf(-1) }   // -1 = chooser; 0 YTM, 1 Spotify, 2 paste
+    var urlText by remember { mutableStateOf("") }
+    var pasteText by remember { mutableStateOf("") }
+    var importedName by remember { mutableStateOf("") }
+
+    androidx.compose.runtime.LaunchedEffect(state) {
+        if (state is ImportState.Previewing) importedName = state.preview.sourceName
+    }
+
+    val fileLauncher = rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri -> if (uri != null) onSourceChosen(ImportSource.CsvFile(uri)) }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                IconButton(onClick = onDismiss) {
+                    Text("←", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                }
+            }
+            Text(
+                "Import",
+                style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        when (state) {
+            is ImportState.Idle -> Column(
+                modifier = Modifier.fillMaxWidth().weight(1f).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (chosen == -1) {
+                    Button(
+                        onClick = { chosen = 0 },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("From YouTube Music") }
+                    Button(
+                        onClick = { chosen = 1 },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("From Spotify") }
+                    Button(
+                        onClick = { chosen = 2 },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Paste a list") }
+                    Button(
+                        onClick = { fileLauncher.launch(arrayOf("text/*", "application/json")) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("From a file") }
+                } else if (chosen == 0 || chosen == 1) {
+                    OutlinedTextField(
+                        value = urlText,
+                        onValueChange = { urlText = it },
+                        label = { Text("Playlist URL") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (chosen == 1) {
+                        Text(
+                            "Public playlists only",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            val url = urlText.trim()
+                            if (url.isNotEmpty()) {
+                                onSourceChosen(
+                                    if (chosen == 0) ImportSource.YtmUrl(url)
+                                    else ImportSource.SpotifyUrl(url)
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Import") }
+                } else {
+                    OutlinedTextField(
+                        value = pasteText,
+                        onValueChange = { pasteText = it },
+                        label = { Text("Artist - Title, one per line") },
+                        modifier = Modifier.fillMaxWidth().weight(1f)
+                    )
+                    Button(
+                        onClick = {
+                            if (pasteText.isNotBlank()) onSourceChosen(ImportSource.TextPaste(pasteText))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Import") }
+                }
+            }
+
+            is ImportState.Resolving -> Column(
+                modifier = Modifier.fillMaxWidth().weight(1f).padding(16.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    if (state.total > 0) "Resolving track ${state.done} of ${state.total}…"
+                    else "Resolving…"
+                )
+                Spacer(Modifier.height(12.dp))
+                androidx.compose.material3.LinearProgressIndicator(
+                    progress = {
+                        if (state.total > 0) state.done.toFloat() / state.total else 0f
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(24.dp))
+                androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+
+            is ImportState.Previewing -> {
+                val preview = state.preview
+                Text(
+                    "${preview.sourceName} · ${preview.tracks.size + preview.unresolved.size} tracks",
+                    style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+                LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                    item {
+                        Text(
+                            "Matched (${preview.tracks.size})",
+                            style = androidx.compose.material3.MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 4.dp)
+                        )
+                    }
+                    items(preview.tracks, key = { it.videoId ?: it.title }) { track ->
+                        ImportTrackRow(track, enabled = true)
+                    }
+                    if (preview.unresolved.isNotEmpty()) {
+                        item {
+                            Text(
+                                "Unmatched (${preview.unresolved.size})",
+                                style = androidx.compose.material3.MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp)
+                            )
+                        }
+                        item {
+                            Text(
+                                "These couldn't be matched on YouTube and won't be imported.",
+                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp)
+                            )
+                        }
+                        items(preview.unresolved, key = { "u:" + it.title + it.artist }) { track ->
+                            ImportTrackRow(track, enabled = false)
+                        }
+                    }
+                }
+                Button(
+                    onClick = { onConfirm(preview) },
+                    modifier = Modifier.fillMaxWidth().padding(16.dp)
+                ) { Text("Confirm import") }
+            }
+
+            is ImportState.Committing -> Column(
+                modifier = Modifier.fillMaxWidth().weight(1f).padding(16.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("Adding songs…")
+                Spacer(Modifier.height(12.dp))
+                androidx.compose.material3.LinearProgressIndicator(
+                    progress = {
+                        if (state.total > 0) state.done.toFloat() / state.total else 0f
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            is ImportState.Done -> Column(
+                modifier = Modifier.fillMaxWidth().weight(1f).padding(16.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "Imported ${state.imported} songs" +
+                        (if (importedName.isNotEmpty()) " to $importedName" else ""),
+                    textAlign = TextAlign.Center
+                )
+                if (state.skipped > 0) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "${state.skipped} track(s) could not be matched.",
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.height(24.dp))
+                Button(
+                    onClick = { onOpenPlaylist(state.playlistId) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Open playlist") }
+                Spacer(Modifier.height(8.dp))
+                androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Done") }
+            }
+
+            is ImportState.Error -> Column(
+                modifier = Modifier.fillMaxWidth().weight(1f).padding(16.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    state.message,
+                    textAlign = TextAlign.Center,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.error
+                )
+                Spacer(Modifier.height(24.dp))
+                Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Close") }
+            }
+        }
+    }
+}
+
+@Composable
+fun ImportTrackRow(track: ImportTrack, enabled: Boolean) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp)
+            .alpha(if (enabled) 1f else 0.45f),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Thumbnail(track.thumbnailUrl, 48.dp)
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(track.title, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                track.artist,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (!enabled) {
+            Text(
+                "Unmatched",
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+    HorizontalDivider()
+}
+
+@Composable
+fun SignInScreen(
+    configured: Boolean,
+    externalError: String?,
+    onSignIn: (idToken: String, rawNonce: String) -> Unit,
+    onBack: () -> Unit
+) {
+    var localError by remember { mutableStateOf<String?>(null) }
+    Column(
+        modifier = Modifier.fillMaxSize().padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            "♪",
+            style = androidx.compose.material3.MaterialTheme.typography.displayMedium,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "MusicApp",
+            style = androidx.compose.material3.MaterialTheme.typography.headlineMedium
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Your library stays on your device. Sign in only to sync with friends.",
+            textAlign = TextAlign.Center,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(24.dp))
+        if (!configured) {
+            Text(
+                "Sync isn't configured yet. Add SUPABASE_URL, SUPABASE_ANON_KEY and " +
+                    "GOOGLE_WEB_CLIENT_ID to secrets.properties, then rebuild.",
+                textAlign = TextAlign.Center,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            GoogleSignInButton(
+                onIdToken = { token, nonce ->
+                    localError = null
+                    onSignIn(token, nonce)
+                },
+                onError = { localError = it }
+            )
+        }
+        (externalError ?: localError)?.let {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                it,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center
+            )
+        }
+        Spacer(Modifier.height(24.dp))
+        androidx.compose.material3.TextButton(onClick = onBack) { Text("Not now") }
+    }
+}
+
+@Composable
+fun FriendsScreen(
+    configured: Boolean,
+    signedIn: Boolean,
+    friends: List<Profile>,
+    loading: Boolean,
+    error: String?,
+    selectedFriend: Profile?,
+    friendSongs: List<SharedPlaylistSong>,
+    friendSongsLoading: Boolean,
+    onBack: () -> Unit,
+    onBackToList: () -> Unit,
+    onOpenFriend: (Profile) -> Unit,
+    onPlayFriendSongs: (Int) -> Unit,
+    onSignIn: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        if (selectedFriend != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    IconButton(onClick = onBackToList) {
+                        Text("←", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                    }
+                }
+                Text(
+                    selectedFriend.displayName ?: selectedFriend.email ?: "Friend",
+                    style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        when {
+            !configured -> CenteredMessage(
+                "Sync isn't configured. Add your Supabase + Google keys to secrets.properties, then rebuild.",
+                modifier = Modifier.fillMaxWidth().weight(1f)
+            )
+            !signedIn -> Column(
+                modifier = Modifier.fillMaxWidth().weight(1f).padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    "Sign in to sync playlists and see what friends are playing.",
+                    textAlign = TextAlign.Center,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = onSignIn) { Text("Sign in") }
+            }
+            selectedFriend != null -> when {
+                friendSongsLoading -> Box(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    androidx.compose.material3.CircularProgressIndicator()
+                }
+                friendSongs.isEmpty() -> CenteredMessage(
+                    "This friend hasn't shared a playlist.",
+                    modifier = Modifier.fillMaxWidth().weight(1f)
+                )
+                else -> LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                    itemsIndexed(friendSongs, key = { _, s -> s.videoId }) { idx, s ->
+                        SharedSongRow(s) { onPlayFriendSongs(idx) }
+                    }
+                }
+            }
+            loading -> Box(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.material3.CircularProgressIndicator()
+            }
+            error != null -> CenteredMessage(
+                error,
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                isError = true
+            )
+            friends.isEmpty() -> CenteredMessage(
+                "No friends yet. Add one by invite code in Settings.",
+                modifier = Modifier.fillMaxWidth().weight(1f)
+            )
+            else -> LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                items(friends, key = { it.id }) { f ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenFriend(f) }
+                            .padding(vertical = 12.dp, horizontal = 4.dp)
+                    ) {
+                        Text(
+                            f.displayName ?: f.email ?: "Friend",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodyLarge
+                        )
+                        Text(
+                            f.email ?: "",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    HorizontalDivider()
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CenteredMessage(text: String, modifier: Modifier = Modifier, isError: Boolean = false) {
+    Box(
+        modifier = modifier.padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text,
+            textAlign = TextAlign.Center,
+            color = if (isError) androidx.compose.material3.MaterialTheme.colorScheme.error
+            else androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+fun SharedSongRow(song: SharedPlaylistSong, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(vertical = 12.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), 48.dp)
+        Spacer(Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(song.title ?: "", maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                song.artist ?: "",
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+    HorizontalDivider()
+}
+
+@Composable
+fun FriendsStrip(
+    items: List<NowPlaying>,
+    friends: List<Profile>,
+    onClick: (NowPlaying) -> Unit
+) {
+    if (items.isEmpty()) return
+    Text(
+        "Friends are listening",
+        style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp)
+    )
+    androidx.compose.foundation.lazy.LazyRow(
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp)
+    ) {
+        items(items, key = { it.userId }) { np ->
+            val who = friends.firstOrNull { it.id == np.userId }
+            val name = who?.displayName ?: who?.email ?: "Friend"
+            Column(
+                modifier = Modifier
+                    .width(96.dp)
+                    .padding(end = 12.dp)
+                    .clickable { onClick(np) },
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clip(androidx.compose.foundation.shape.CircleShape)
+                        .background(
+                            androidx.compose.material3.MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        name.firstOrNull()?.uppercase() ?: "?",
+                        style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    name,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    np.title ?: "",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun NewDropsScreen(
+    drops: List<NewDrop>,
+    loading: Boolean,
+    downloadIds: List<String>,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+    onPlay: (NewDrop) -> Unit,
+    onLongClick: (NewDrop) -> Unit,
+    onToggleFavorite: (NewDrop) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                IconButton(onClick = onBack) {
+                    Text("←", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                }
+            }
+            Text(
+                "New drops",
+                style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.weight(1f)
+            )
+            if (loading) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp
+                )
+                Spacer(Modifier.width(4.dp))
+            }
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                IconButton(onClick = onRefresh) {
+                    Text("⟳", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                }
+            }
+        }
+
+        if (drops.isEmpty()) {
+            Column(
+                modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    "No new drops right now. Play a few songs or favorite some artists and pull back here.",
+                    textAlign = TextAlign.Center,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        } else {
+            LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                items(drops, key = { it.videoId }) { drop ->
+                    SongRow(
+                        song = drop.asSong(),
+                        onClick = { onPlay(drop) },
+                        onToggleFavorite = { onToggleFavorite(drop) },
+                        onLongClick = { onLongClick(drop) },
+                        showDownloaded = downloadIds.contains(drop.videoId)
+                    )
+                }
+                item { Spacer(Modifier.height(96.dp)) }
+            }
+        }
+    }
+}
+
+@Composable
+fun DownloadsScreen(
+    downloads: List<Download>,
+    downloadStates: Map<String, DownloadState>,
+    onPlay: (Int) -> Unit,
+    onRemove: (Download) -> Unit,
+    onRemoveAll: () -> Unit,
+    onFindMusic: () -> Unit
+) {
+    if (downloads.isEmpty()) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                "✓",
+                style = androidx.compose.material3.MaterialTheme.typography.displaySmall,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Music and podcasts that you download will appear here.",
+                textAlign = TextAlign.Center,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 32.dp)
+            )
+            Spacer(Modifier.height(16.dp))
+            Button(onClick = onFindMusic) { Text("Find music") }
+        }
+        return
+    }
+
+    val totalBytes = downloads.sumOf { it.fileSizeBytes }
+    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "${downloads.size} songs · ${formatBytes(totalBytes)}",
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                IconButton(onClick = onRemoveAll) {
+                    Text(
+                        "⋮",
+                        style = androidx.compose.material3.MaterialTheme.typography.titleLarge
+                    )
+                }
+            }
+        }
+        LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
+            itemsIndexed(downloads, key = { _, d -> d.videoId }) { idx, d ->
+                val st = downloadStates[d.videoId]
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPlay(idx) }
+                        .padding(vertical = 8.dp, horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Thumbnail(d.thumbnailUrl ?: youtubeThumb(d.videoId), 56.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            d.title,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            d.artist,
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (st is DownloadState.Downloading) {
+                        Text(
+                            "${st.percent}%",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(end = 4.dp)
+                        )
+                    } else {
+                        Text(
+                            "✓",
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(end = 4.dp)
+                        )
+                    }
+                    Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                        IconButton(onClick = { onRemove(d) }) {
+                            Text(
+                                "⋮",
+                                style = androidx.compose.material3.MaterialTheme.typography.titleMedium
+                            )
+                        }
+                    }
+                }
+                HorizontalDivider()
+            }
+            item { Spacer(Modifier.height(96.dp)) }
+        }
+    }
+}
+
+@Composable
+fun SettingsScreen(
+    storageExternal: Boolean,
+    onStorageChange: (Boolean) -> Unit,
+    downloadDirPath: String,
+    downloadCount: Int,
+    totalBytes: Long,
+    onRemoveAll: () -> Unit,
+    onBack: () -> Unit,
+    signedIn: Boolean = false,
+    syncConfigured: Boolean = false,
+    accountEmail: String? = null,
+    inviteCode: String? = null,
+    onSignIn: () -> Unit = {},
+    onSignOut: () -> Unit = {},
+    onCopyInvite: () -> Unit = {},
+    friends: List<Profile> = emptyList(),
+    addFriendCode: String = "",
+    onAddFriendCodeChange: (String) -> Unit = {},
+    onAddFriend: () -> Unit = {},
+    addFriendStatus: String? = null
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                IconButton(onClick = onBack) {
+                    Text(
+                        "←",
+                        style = androidx.compose.material3.MaterialTheme.typography.headlineMedium
+                    )
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "Settings",
+                style = androidx.compose.material3.MaterialTheme.typography.headlineSmall
+            )
+        }
+        HorizontalDivider()
+
+        Text(
+            "Account",
+            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(vertical = 12.dp)
+        )
+        if (!syncConfigured) {
+            Text(
+                "Sync isn't configured. Add SUPABASE_URL, SUPABASE_ANON_KEY and " +
+                    "GOOGLE_WEB_CLIENT_ID to secrets.properties, then rebuild.",
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else if (signedIn) {
+            Text(
+                "Signed in as ${accountEmail ?: "unknown"}",
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Invite code: ${inviteCode ?: "…"}",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                androidx.compose.material3.TextButton(onClick = onCopyInvite) { Text("Copy") }
+            }
+            Spacer(Modifier.height(8.dp))
+            androidx.compose.material3.OutlinedButton(onClick = onSignOut) { Text("Sign out") }
+        } else {
+            Text(
+                "Not signed in. Sync with friends is off.",
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            androidx.compose.material3.Button(onClick = onSignIn) { Text("Sign in") }
+        }
+
+        Spacer(Modifier.height(12.dp))
+        HorizontalDivider()
+        Text(
+            "Friends",
+            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(vertical = 12.dp)
+        )
+        if (signedIn) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = addFriendCode,
+                    onValueChange = onAddFriendCodeChange,
+                    label = { Text("Invite code") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.width(8.dp))
+                androidx.compose.material3.TextButton(onClick = onAddFriend) { Text("Add") }
+            }
+            addFriendStatus?.let {
+                Text(
+                    it,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            if (friends.isEmpty()) {
+                Text(
+                    "No friends yet.",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                friends.forEach { f ->
+                    Column(Modifier.padding(vertical = 6.dp)) {
+                        Text(
+                            f.displayName ?: f.email ?: "Friend",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            f.email ?: "",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        } else {
+            Text(
+                "Sign in to manage friends.",
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        Spacer(Modifier.height(12.dp))
+        HorizontalDivider()
+
+        Text(
+            "Storage",
+            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(vertical = 12.dp)
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onStorageChange(false) }
+                .padding(vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (!storageExternal) "◉" else "○",
+                style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.width(12.dp))
+            Text("Internal (default)")
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onStorageChange(true) }
+                .padding(vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (storageExternal) "◉" else "○",
+                style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.width(12.dp))
+            Text("External")
+        }
+        Text(
+            "Download folder: $downloadDirPath",
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+
+        Spacer(Modifier.height(12.dp))
+        HorizontalDivider()
+        Text(
+            "Downloads",
+            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(vertical = 12.dp)
+        )
+        Text(
+            "Total: $downloadCount songs, ${formatBytes(totalBytes)}",
+            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(12.dp))
+        androidx.compose.material3.OutlinedButton(onClick = onRemoveAll) {
+            Text("Remove all downloads")
+        }
+    }
+}
+
+fun formatBytes(b: Long): String {
+    if (b < 1024) return "$b B"
+    val kb = b / 1024.0
+    if (kb < 1024) return "%.1f KB".format(kb)
+    val mb = kb / 1024.0
+    if (mb < 1024) return "%.1f MB".format(mb)
+    return "%.1f GB".format(mb / 1024.0)
 }
 
 @Preview(showBackground = true)
