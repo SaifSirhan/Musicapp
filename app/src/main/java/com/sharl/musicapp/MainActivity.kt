@@ -3,6 +3,7 @@ package com.sharl.musicapp
 import android.Manifest
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -16,6 +17,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -44,8 +46,13 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -56,6 +63,8 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -68,9 +77,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.media3.common.MediaItem
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.sharl.musicapp.data.AppDatabase
 import com.sharl.musicapp.data.AuthRepository
 import com.sharl.musicapp.data.Download
 import com.sharl.musicapp.data.DownloadRepository
@@ -83,6 +94,7 @@ import com.sharl.musicapp.data.ImportTrack
 import com.sharl.musicapp.data.NewDrop
 import com.sharl.musicapp.data.NewDropsRepository
 import com.sharl.musicapp.data.NowPlaying
+import com.sharl.musicapp.data.PlaybackCache
 import com.sharl.musicapp.data.Playlist
 import com.sharl.musicapp.data.PlaylistRepository
 import com.sharl.musicapp.data.PlaylistSong
@@ -94,6 +106,10 @@ import com.sharl.musicapp.data.Song
 import com.sharl.musicapp.data.SongRepository
 import com.sharl.musicapp.data.SpeedDialRepository
 import com.sharl.musicapp.data.SpeedDialSlot
+import com.sharl.musicapp.data.UpdateInfo
+import com.sharl.musicapp.data.UpdateRepository
+import com.sharl.musicapp.data.UpdateState
+import java.io.File
 import com.sharl.musicapp.ui.GoogleSignInButton
 import com.sharl.musicapp.ui.theme.AccentOptions
 import com.sharl.musicapp.ui.theme.DefaultAccent
@@ -115,16 +131,21 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(prefs.getInt("accent_index", 0))
             }
             val accent = AccentOptions.getOrNull(accentIndex)?.color ?: DefaultAccent
+            val snackbarHostState = remember { SnackbarHostState() }
 
             MusicAppTheme(accent = accent) {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                Scaffold(
+                    modifier = Modifier.fillMaxSize(),
+                    snackbarHost = { SnackbarHost(snackbarHostState) }
+                ) { innerPadding ->
                     PlayerScreen(
                         modifier = Modifier.padding(innerPadding),
                         accentIndex = accentIndex,
                         onAccentChange = { idx ->
                             accentIndex = idx
                             prefs.edit().putInt("accent_index", idx).apply()
-                        }
+                        },
+                        snackbarHostState = snackbarHostState
                     )
                 }
             }
@@ -137,7 +158,8 @@ class MainActivity : ComponentActivity() {
 fun PlayerScreen(
     modifier: Modifier = Modifier,
     accentIndex: Int,
-    onAccentChange: (Int) -> Unit
+    onAccentChange: (Int) -> Unit,
+    snackbarHostState: SnackbarHostState = SnackbarHostState()
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -189,7 +211,10 @@ fun PlayerScreen(
     var videoModeLoading by remember { mutableStateOf(false) }
 
     val urlCache = remember { mutableStateMapOf<String, Pair<String, SongMetadata>>() }
-    var pendingExtraction by remember { mutableStateOf<String?>(null) }
+    var loadingVideoId by remember { mutableStateOf<String?>(null) }
+    val extractMutex = remember { Mutex() }
+
+    LaunchedEffect(Unit) { PlaybackCache.init(context) }
 
     val playlistRepo = remember { PlaylistRepository(context) }
     val playlists by playlistRepo.all().collectAsState(initial = emptyList())
@@ -221,6 +246,34 @@ fun PlayerScreen(
     var playlistListSongCount by remember { mutableStateOf(0) }
     var playlistListDownloaded by remember { mutableStateOf(0) }
     var showRemoveAllDownloads by remember { mutableStateOf(false) }
+    var showClearLibraryConfirm by remember { mutableStateOf(false) }
+    var showPrivacyPolicy by remember { mutableStateOf(false) }
+    var notifyUpdates by remember { mutableStateOf(settings.notifyUpdates) }
+    var removalProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+
+    // --- In-app updater (Phase 15c). Never auto-downloads. ---
+    val updateRepo = remember { UpdateRepository(context) }
+    val updateState by updateRepo.state.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        if (!BuildConfig.DEBUG) updateRepo.check()
+    }
+    androidx.compose.runtime.LaunchedEffect(updateState) {
+        val s = updateState
+        if (s is UpdateState.Available &&
+            s.info.versionCode != settings.dismissUpdateForVersion &&
+            settings.notifyUpdates
+        ) {
+            val result = snackbarHostState.showSnackbar(
+                message = "Update available — tap to install",
+                actionLabel = "Install"
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                showSettings = true
+            } else {
+                settings.dismissUpdateForVersion = s.info.versionCode
+            }
+        }
+    }
 
     val newDropsRepo = remember { NewDropsRepository(context) }
     val newDrops by newDropsRepo.drops.collectAsState()
@@ -345,14 +398,29 @@ fun PlayerScreen(
     }
 
     fun removeAllDownloads() {
+        val items = downloads
         scope.launch {
-            downloads.forEach { d ->
+            val showProgress = items.size > 5
+            items.forEachIndexed { idx, d ->
+                if (showProgress) removalProgress = (idx + 1) to items.size
                 try {
                     Downloader.remove(context, d)
                 } catch (e: Exception) {
                     Log.w("DOWNLOAD", "remove failed for ${d.videoId}", e)
                 }
             }
+            removalProgress = null
+            snackbarHostState.showSnackbar("Downloads removed.")
+        }
+    }
+
+    fun clearLibrary() {
+        scope.launch {
+            val db = AppDatabase.get(context)
+            db.songDao().clearAll()
+            db.playlistDao().clearAll()
+            db.speedDialDao().clearAll()
+            snackbarHostState.showSnackbar("Library cleared.")
         }
     }
 
@@ -416,6 +484,37 @@ fun PlayerScreen(
         }
     }
 
+    // Fire-and-forget background extraction into the cache. Never plays, never
+    // blocks UI, swallows errors. Serialized against user-initiated extraction
+    // via the shared mutex so only one yt-dlp process runs at a time.
+    suspend fun preExtract(videoId: String) {
+        if (videoId.isBlank()) return
+        if (PlaybackCache.get(videoId) != null) return
+        if (downloadRepo.get(videoId)?.let { java.io.File(it.filePath).exists() } == true) return
+        extractMutex.withLock {
+            if (PlaybackCache.get(videoId) != null) return@withLock
+            try {
+                val pre = YtdlpHelper.extractUrlAndMetadata(context, videoId)
+                if (pre != null) {
+                    val (u, m) = pre
+                    PlaybackCache.put(videoId, u, m.title, m.artist, m.album, m.thumbnailUrl)
+                    urlCache[videoId] = pre
+                    Log.d("PRECACHE", "cached: $videoId")
+                }
+            } catch (e: Exception) {
+                Log.w("PRECACHE", "pre-extract failed for $videoId", e)
+            }
+        }
+    }
+
+    // Warm the top of the For You rows when they compose (one per screen).
+    androidx.compose.runtime.LaunchedEffect(
+        forYouRecent.firstOrNull()?.videoId,
+        forYouTop.firstOrNull()?.videoId
+    ) {
+        (forYouRecent.firstOrNull() ?: forYouTop.firstOrNull())?.videoId?.let { preExtract(it) }
+    }
+
     suspend fun extractOrCache(videoId: String): Pair<String, SongMetadata>? {
         // Offline short-circuit: a downloaded song resolves to its local file,
         // no network / no yt-dlp re-extraction.
@@ -430,11 +529,35 @@ fun PlayerScreen(
                 )
             }
         }
+        // 1. In-memory (this session).
         urlCache[videoId]?.let {
             urlCache.remove(videoId)
             return it
         }
-        return YtdlpHelper.extractUrlAndMetadata(context, videoId)
+        // 2. Persistent cache (survives restart).
+        PlaybackCache.get(videoId)?.let { c ->
+            return c.url to SongMetadata(
+                title = c.title,
+                artist = c.artist,
+                album = c.album,
+                thumbnailUrl = c.thumbnailUrl
+            )
+        }
+        // 3. Cold extract — surface a loading state and serialize yt-dlp.
+        loadingVideoId = videoId
+        try {
+            val result = extractMutex.withLock {
+                YtdlpHelper.extractUrlAndMetadata(context, videoId)
+            }
+            if (result != null) {
+                val (u, m) = result
+                PlaybackCache.put(videoId, u, m.title, m.artist, m.album, m.thumbnailUrl)
+                urlCache[videoId] = result
+            }
+            return result
+        } finally {
+            if (loadingVideoId == videoId) loadingVideoId = null
+        }
     }
 
     fun playFromQueue(items: List<QueueItem>, index: Int) {
@@ -492,28 +615,12 @@ fun PlayerScreen(
                 }
 
                 val nextIndex = index + 1
-                if (nextIndex in items.indices) {
-                    val nextId = items[nextIndex].videoId
-                    val nextDownloaded = downloadRepo.get(nextId)?.let {
-                        java.io.File(it.filePath).exists()
-                    } ?: false
-                    if (!urlCache.containsKey(nextId) && pendingExtraction != nextId && !nextDownloaded) {
-                        pendingExtraction = nextId
-                        scope.launch {
-                            try {
-                                val pre = YtdlpHelper.extractUrlAndMetadata(context, nextId)
-                                if (pre != null) {
-                                    urlCache[nextId] = pre
-                                    Log.d("PRECACHE", "cached: $nextId")
-                                }
-                            } catch (e: Exception) {
-                                Log.w("PRECACHE", "pre-extract failed for $nextId", e)
-                            } finally {
-                                if (pendingExtraction == nextId) pendingExtraction = null
-                            }
-                        }
+                // Pre-extract the next two queue items so skips/auto-advance are
+                // instant. Fire-and-forget; one at a time via the shared mutex.
+                listOfNotNull(items.getOrNull(nextIndex), items.getOrNull(index + 2))
+                    .forEach { next ->
+                        scope.launch { preExtract(next.videoId) }
                     }
-                }
             } catch (e: Exception) {
                 val msg = e.message ?: "unknown error"
                 Log.e("YTDL", "Failed: $msg")
@@ -685,7 +792,9 @@ fun PlayerScreen(
                     playlistMenuSong = ps
                     playlistMenuPlaylistId = openPlaylistId
                 },
-                onPlaylistMenu = { pl -> playlistListMenu = pl }
+                onPlaylistMenu = { pl -> playlistListMenu = pl },
+                loadingVideoId = loadingVideoId,
+                onPreExtract = { id -> scope.launch { preExtract(id) } }
             )
         } else if (showNowPlaying && nowPlayingTitle != null) {
             androidx.activity.compose.BackHandler(enabled = true) {
@@ -696,6 +805,7 @@ fun PlayerScreen(
                 artist = nowPlayingArtist ?: "",
                 thumbnailUrl = nowPlayingThumbnail,
                 isPlaying = isPlaying,
+                isLoading = loadingVideoId != null && loadingVideoId == queue.getOrNull(queueIndex)?.videoId,
                 isShuffled = isShuffled,
                 repeatMode = repeatMode,
                 lyrics = lyrics,
@@ -746,6 +856,11 @@ fun PlayerScreen(
                     }
                 }
             )
+        } else if (showPrivacyPolicy) {
+            androidx.activity.compose.BackHandler(enabled = true) {
+                showPrivacyPolicy = false
+            }
+            PrivacyPolicyScreen(onBack = { showPrivacyPolicy = false })
         } else if (showSettings) {
             androidx.activity.compose.BackHandler(enabled = true) {
                 showSettings = false
@@ -760,6 +875,16 @@ fun PlayerScreen(
                 downloadCount = downloads.size,
                 totalBytes = downloads.sumOf { it.fileSizeBytes },
                 onRemoveAll = { showRemoveAllDownloads = true },
+                onClearLibrary = { showClearLibraryConfirm = true },
+                onViewPrivacyPolicy = { showPrivacyPolicy = true },
+                notifyUpdates = notifyUpdates,
+                onNotifyUpdatesChange = { v ->
+                    notifyUpdates = v
+                    settings.notifyUpdates = v
+                },
+                accentName = AccentOptions.getOrNull(accentIndex)?.name ?: "Default",
+                accentColor = AccentOptions.getOrNull(accentIndex)?.color ?: DefaultAccent,
+                onOpenAccentPicker = { showColorPicker = true },
                 onBack = { showSettings = false },
                 signedIn = signedIn,
                 syncConfigured = authRepo.configured,
@@ -794,7 +919,11 @@ fun PlayerScreen(
                             .onFailure { addFriendStatus = it.message ?: "Could not add friend." }
                     }
                 },
-                addFriendStatus = addFriendStatus
+                addFriendStatus = addFriendStatus,
+                updateState = updateState,
+                onCheckForUpdates = { scope.launch { updateRepo.check() } },
+                onDownloadUpdate = { info -> scope.launch { updateRepo.download(info) } },
+                onInstallUpdate = { file -> installUpdate(context, file) }
             )
         } else if (showNewDropsAll) {
             androidx.activity.compose.BackHandler(enabled = true) {
@@ -895,7 +1024,7 @@ fun PlayerScreen(
             )
 
             Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                androidx.compose.material3.IconButton(onClick = { showColorPicker = true }) {
+                androidx.compose.material3.IconButton(onClick = { showSettings = true }) {
                     Text("⚙", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
                 }
             }
@@ -906,6 +1035,9 @@ fun PlayerScreen(
                 val quickPicks30 = androidx.compose.runtime.remember(forYouTop, forYouRecent) {
                     val combined = (forYouTop + forYouRecent).distinctBy { it.videoId }
                     combined.take(30)
+                }
+                androidx.compose.runtime.LaunchedEffect(quickPicks30.firstOrNull()?.videoId) {
+                    quickPicks30.firstOrNull()?.videoId?.let { preExtract(it) }
                 }
                 val quickPickPages = (quickPicks30.size + 5) / 6
                 LazyColumn(
@@ -966,8 +1098,16 @@ fun PlayerScreen(
                                                     )
                                                 }
                                                 Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                                                    IconButton(onClick = { menuSong = song }) {
-                                                        Text("⋮", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                                                    if (song.videoId == loadingVideoId) {
+                                                        androidx.compose.material3.CircularProgressIndicator(
+                                                            modifier = Modifier.size(16.dp),
+                                                            strokeWidth = 2.dp,
+                                                            color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+                                                        )
+                                                    } else {
+                                                        IconButton(onClick = { menuSong = song }) {
+                                                            Text("⋮", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1258,9 +1398,13 @@ fun PlayerScreen(
                     kotlinx.coroutines.delay(400)
                     isSearching = true
                     try {
-                        val found = YtdlpHelper.searchYouTube(context, trimmed, 5)
+                        val t0 = android.os.SystemClock.elapsedRealtime()
+                        val found = YtdlpHelper.searchYouTube(context, trimmed)
+                        Log.d("YTDL", "search '${trimmed}' took ${android.os.SystemClock.elapsedRealtime() - t0}ms")
                         if (query.trim() == trimmed) {
                             results = found
+                            // Warm the first result so an immediate tap is instant.
+                            found.firstOrNull()?.videoId?.let { scope.launch { preExtract(it) } }
                         }
                     } catch (e: Exception) {
                         Log.e("YTDL", "live search failed: ${e.message}")
@@ -1334,7 +1478,8 @@ fun PlayerScreen(
                                 },
                                 onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } },
                                 onLongClick = { menuSong = song },
-                                showDownloaded = downloadIds.contains(song.videoId)
+                                showDownloaded = downloadIds.contains(song.videoId),
+                                isLoading = song.videoId == loadingVideoId
                             )
                         }
                         item { HorizontalDivider() }
@@ -1349,10 +1494,7 @@ fun PlayerScreen(
                     }
                     val items = results.map { QueueItem(it.videoId, it.title) }
                     itemsIndexed(results, key = { _, result -> result.videoId }) { idx, result ->
-                        Text(
-                            text = result.title,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .combinedClickable(
@@ -1370,8 +1512,24 @@ fun PlayerScreen(
                                         )
                                     }
                                 )
-                                .padding(vertical = 12.dp)
-                        )
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = result.title,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (result.videoId == loadingVideoId) {
+                                androidx.compose.material3.CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(Modifier.width(8.dp))
+                            }
+                        }
                         HorizontalDivider()
                     }
                     if (!isSearching && query.trim().length >= 2 && localMatches.isEmpty() && results.isEmpty()) {
@@ -1397,43 +1555,42 @@ fun PlayerScreen(
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        FilterChip(
-                            selected = libraryTab == 0,
-                            onClick = { libraryTab = 0 },
-                            label = { Text("Downloads") }
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        FilterChip(
-                            selected = libraryTab == 1,
-                            onClick = { libraryTab = 1 },
-                            label = { Text("Playlists") }
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        FilterChip(
-                            selected = libraryTab == 2,
-                            onClick = { libraryTab = 2 },
-                            label = { Text("Favorites") }
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        FilterChip(
-                            selected = libraryTab == 3,
-                            onClick = { libraryTab = 3 },
-                            label = { Text("Friends") }
-                        )
-                        Spacer(Modifier.weight(1f))
+                        // Only the chip strip scrolls; the trailing icons stay anchored
+                        // to the end so they're always reachable on narrow screens.
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .horizontalScroll(rememberScrollState()),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            FilterChip(
+                                selected = libraryTab == 0,
+                                onClick = { libraryTab = 0 },
+                                label = { Text("Downloads", maxLines = 1, softWrap = false) }
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            FilterChip(
+                                selected = libraryTab == 1,
+                                onClick = { libraryTab = 1 },
+                                label = { Text("Playlists", maxLines = 1, softWrap = false) }
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            FilterChip(
+                                selected = libraryTab == 2,
+                                onClick = { libraryTab = 2 },
+                                label = { Text("Favorites", maxLines = 1, softWrap = false) }
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            FilterChip(
+                                selected = libraryTab == 3,
+                                onClick = { libraryTab = 3 },
+                                label = { Text("Friends", maxLines = 1, softWrap = false) }
+                            )
+                        }
                         Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
                             IconButton(onClick = { importRepo.reset(); showImport = true }) {
                                 Text(
                                     "⤓",
-                                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
-                                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        }
-                        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                            IconButton(onClick = { showSettings = true }) {
-                                Text(
-                                    "⚙",
                                     style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
                                     color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
                                 )
@@ -1498,7 +1655,9 @@ fun PlayerScreen(
                                     playlistMenuSong = ps
                                     playlistMenuPlaylistId = openPlaylistId
                                 },
-                                onPlaylistMenu = { pl -> playlistListMenu = pl }
+                                onPlaylistMenu = { pl -> playlistListMenu = pl },
+                                loadingVideoId = loadingVideoId,
+                                onPreExtract = { id -> scope.launch { preExtract(id) } }
                             )
                         }
                         2 -> {
@@ -1523,7 +1682,8 @@ fun PlayerScreen(
                                             onClick = { playFromQueue(items, idx) },
                                             onToggleFavorite = { scope.launch { repo.toggleFavorite(song) } },
                                             onLongClick = { menuSong = song },
-                                            showDownloaded = downloadIds.contains(song.videoId)
+                                            showDownloaded = downloadIds.contains(song.videoId),
+                                            isLoading = song.videoId == loadingVideoId
                                         )
                                     }
                                 }
@@ -1584,6 +1744,7 @@ fun PlayerScreen(
                                 selectedFriend = selectedFriend,
                                 friendSongs = selectedFriendSongs,
                                 friendSongsLoading = selectedFriendSongsLoading,
+                                nowPlaying = friendsNowPlaying,
                                 onBack = { selectedFriend = null },
                                 onBackToList = { selectedFriend = null },
                                 onOpenFriend = { f ->
@@ -1668,10 +1829,19 @@ fun PlayerScreen(
                         },
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        if (isPlaying) "⏸" else "▶",
-                        style = androidx.compose.material3.MaterialTheme.typography.titleLarge
-                    )
+                    val miniLoading = loadingVideoId != null && loadingVideoId == queue.getOrNull(queueIndex)?.videoId
+                    if (miniLoading) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+                        )
+                    } else {
+                        Text(
+                            if (isPlaying) "⏸" else "▶",
+                            style = androidx.compose.material3.MaterialTheme.typography.titleLarge
+                        )
+                    }
                 }
                 Box(
                     modifier = Modifier
@@ -1866,7 +2036,12 @@ fun PlayerScreen(
                 Column(modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
                     val who = friendsList.firstOrNull { it.id == np.userId }
                     Text(
-                        (who?.displayName ?: who?.email ?: "A friend") + " is listening to",
+                        "Last seen ${formatRelative(np.updatedAt)}",
+                        style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        who?.displayName ?: who?.email ?: "A friend",
                         style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
                         color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -2223,7 +2398,10 @@ fun PlayerScreen(
                                 playlistListMenu = null
                             }
                         } else {
-                            MenuItem("Share with friends") {
+                            MenuItem(
+                                "Share with friends",
+                                subtitle = "Snapshot — re-share to update."
+                            ) {
                                 val pid = plMenu.id
                                 val pname = plMenu.name
                                 scope.launch {
@@ -2239,16 +2417,60 @@ fun PlayerScreen(
             }
         }
 
+        if (showClearLibraryConfirm) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showClearLibraryConfirm = false },
+                title = { Text("Clear library?") },
+                text = {
+                    Text(
+                        "This removes all songs, playlists, favorites, speed dial slots, " +
+                            "and play history from MusicApp.\n\n" +
+                            "Downloaded audio files are NOT removed — use \"Remove all downloads\" " +
+                            "for that.\n\n" +
+                            "This cannot be undone."
+                    )
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        clearLibrary()
+                        showClearLibraryConfirm = false
+                    }) {
+                        Text(
+                            "Clear",
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.error
+                        )
+                    }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { showClearLibraryConfirm = false }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+
         if (showRemoveAllDownloads) {
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { showRemoveAllDownloads = false },
                 title = { Text("Remove all downloads?") },
-                text = { Text("This deletes every downloaded file. This cannot be undone.") },
+                text = {
+                    Text(
+                        "This deletes every downloaded song from device storage.\n\n" +
+                            "Your library, playlists, and favorites stay intact — only the " +
+                            "offline audio files are removed.\n\n" +
+                            "You can re-download songs later."
+                    )
+                },
                 confirmButton = {
                     androidx.compose.material3.TextButton(onClick = {
                         removeAllDownloads()
                         showRemoveAllDownloads = false
-                    }) { Text("Remove all") }
+                    }) {
+                        Text(
+                            "Remove",
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.error
+                        )
+                    }
                 },
                 dismissButton = {
                     androidx.compose.material3.TextButton(onClick = { showRemoveAllDownloads = false }) {
@@ -2257,22 +2479,40 @@ fun PlayerScreen(
                 }
             )
         }
+
+        removalProgress?.let { (done, total) ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = {},
+                title = { Text("Removing downloads") },
+                text = { Text("Removing $done of $total…") },
+                confirmButton = {}
+            )
+        }
     }
 }
 
 @Composable
-fun MenuItem(label: String, onClick: () -> Unit) {
+fun MenuItem(label: String, subtitle: String? = null, onClick: () -> Unit) {
     androidx.compose.material3.TextButton(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth()
     ) {
-        Text(
-            label,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 4.dp),
-            textAlign = androidx.compose.ui.text.style.TextAlign.Start
-        )
+        Column(modifier = Modifier.fillMaxWidth().padding(start = 4.dp)) {
+            Text(
+                label,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Start
+            )
+            if (subtitle != null) {
+                Text(
+                    subtitle,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Start,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }
 
@@ -2541,7 +2781,8 @@ fun SongRow(
     onClick: () -> Unit,
     onToggleFavorite: () -> Unit,
     onLongClick: () -> Unit,
-    showDownloaded: Boolean = false
+    showDownloaded: Boolean = false,
+    isLoading: Boolean = false
 ) {
     Row(
         modifier = Modifier
@@ -2588,6 +2829,15 @@ fun SongRow(
                 style = androidx.compose.material3.MaterialTheme.typography.titleLarge
             )
         }
+        if (isLoading) {
+            Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+                )
+            }
+        }
     }
     HorizontalDivider()
 }
@@ -2603,6 +2853,32 @@ fun youtubeThumb(videoId: String): String =
 fun formatDate(epochMs: Long): String {
     val sdf = java.text.SimpleDateFormat("MMM yyyy", java.util.Locale.getDefault())
     return sdf.format(java.util.Date(epochMs))
+}
+
+// Parses a PostgREST timestamptz string (e.g. "2026-10-13T10:31:00.123456+00:00").
+fun parseIsoMs(iso: String?): Long? {
+    if (iso.isNullOrBlank()) return null
+    return try {
+        val noFrac = iso.replace(Regex("\\.\\d+"), "")
+        val normalized = noFrac
+            .replace(Regex("([+-]\\d{2}):(\\d{2})$"), "$1$2")
+            .replace("Z", "+0000")
+        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", java.util.Locale.getDefault())
+            .parse(normalized)?.time
+    } catch (_: Exception) {
+        null
+    }
+}
+
+fun formatRelative(iso: String?): String {
+    val ms = parseIsoMs(iso) ?: return "just now"
+    val diff = System.currentTimeMillis() - ms
+    return when {
+        diff < 60_000 -> "just now"
+        diff < 3_600_000 -> "${diff / 60_000} min ago"
+        diff < 86_400_000 -> "${diff / 3_600_000} h ago"
+        else -> "${diff / 86_400_000} d ago"
+    }
 }
 
 @Composable
@@ -2625,6 +2901,7 @@ fun NowPlayingScreen(
     artist: String,
     thumbnailUrl: String?,
     isPlaying: Boolean,
+    isLoading: Boolean,
     isShuffled: Boolean,
     repeatMode: Int,
     lyrics: List<LyricLine>,
@@ -2696,6 +2973,16 @@ fun NowPlayingScreen(
 
         val queueListState = androidx.compose.foundation.lazy.rememberLazyListState()
 
+        var showExtracting by remember { mutableStateOf(false) }
+        androidx.compose.runtime.LaunchedEffect(isLoading) {
+            if (isLoading) {
+                kotlinx.coroutines.delay(2000)
+                showExtracting = true
+            } else {
+                showExtracting = false
+            }
+        }
+
         androidx.compose.runtime.LaunchedEffect(nowPlayingTab, queueIndex) {
             if (nowPlayingTab == 2 && queueIndex >= 0) {
                 queueListState.animateScrollToItem(queueIndex)
@@ -2749,6 +3036,16 @@ fun NowPlayingScreen(
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     modifier = Modifier.fillMaxWidth()
                 )
+                if (isLoading && showExtracting) {
+                    Spacer(modifier = Modifier.size(6.dp))
+                    Text(
+                        text = "Extracting audio…",
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
 
                 Spacer(modifier = Modifier.weight(0.4f))
 
@@ -2993,11 +3290,19 @@ fun NowPlayingScreen(
                 contentAlignment = Alignment.Center
             ) {
                 androidx.compose.material3.IconButton(onClick = onPlayPause) {
-                    Text(
-                        if (isPlaying) "⏸" else "▶",
-                        style = androidx.compose.material3.MaterialTheme.typography.displayMedium,
-                        color = androidx.compose.material3.MaterialTheme.colorScheme.primary
-                    )
+                    if (isLoading) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            modifier = Modifier.size(32.dp),
+                            strokeWidth = 3.dp,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+                        )
+                    } else {
+                        Text(
+                            if (isPlaying) "⏸" else "▶",
+                            style = androidx.compose.material3.MaterialTheme.typography.displayMedium,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             }
             Box(
@@ -3026,7 +3331,8 @@ fun PlaylistSongsContent(
     onPlayFromPlaylist: (List<PlaylistSong>, Int) -> Unit,
     onRequestRename: () -> Unit,
     onRequestDelete: () -> Unit,
-    onSongMenu: (PlaylistSong) -> Unit
+    onSongMenu: (PlaylistSong) -> Unit,
+    loadingVideoId: String? = null
 ) {
     val listState = rememberLazyListState()
     var showOverflow by remember(playlistName) { mutableStateOf(false) }
@@ -3236,11 +3542,19 @@ fun PlaylistSongsContent(
                     )
                 }
                 Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                    androidx.compose.material3.IconButton(onClick = { onSongMenu(ps) }) {
-                        Text(
-                            "⋮",
-                            style = androidx.compose.material3.MaterialTheme.typography.titleMedium
+                    if (ps.videoId == loadingVideoId) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.primary
                         )
+                    } else {
+                        androidx.compose.material3.IconButton(onClick = { onSongMenu(ps) }) {
+                            Text(
+                                "⋮",
+                                style = androidx.compose.material3.MaterialTheme.typography.titleMedium
+                            )
+                        }
                     }
                 }
             }
@@ -3265,7 +3579,9 @@ fun PlaylistsScreen(
     onRequestRename: () -> Unit,
     onRequestDelete: () -> Unit,
     onSongMenu: (PlaylistSong) -> Unit,
-    onPlaylistMenu: (Playlist) -> Unit = {}
+    onPlaylistMenu: (Playlist) -> Unit = {},
+    loadingVideoId: String? = null,
+    onPreExtract: (String) -> Unit = {}
 ) {
     if (openPlaylistId != null) {
         val playlistSongs by remember(openPlaylistId) {
@@ -3277,6 +3593,10 @@ fun PlaylistsScreen(
             Log.d("PLAYLIST", "loaded ${list.size} songs for playlist $openPlaylistId")
         }
 
+        LaunchedEffect(openPlaylistId, playlistSongs.firstOrNull()?.videoId) {
+            playlistSongs.firstOrNull()?.videoId?.let { onPreExtract(it) }
+        }
+
         PlaylistSongsContent(
             playlistSongs = playlistSongs,
             playlistName = playlistName,
@@ -3285,7 +3605,8 @@ fun PlaylistsScreen(
             onPlayFromPlaylist = onPlayFromPlaylist,
             onRequestRename = onRequestRename,
             onRequestDelete = onRequestDelete,
-            onSongMenu = onSongMenu
+            onSongMenu = onSongMenu,
+            loadingVideoId = loadingVideoId
         )
         return
     }
@@ -3630,7 +3951,7 @@ fun ImportTrackRow(track: ImportTrack, enabled: Boolean) {
 fun SignInScreen(
     configured: Boolean,
     externalError: String?,
-    onSignIn: (idToken: String, rawNonce: String) -> Unit,
+    onSignIn: (idToken: String, rawNonce: String?) -> Unit,
     onBack: () -> Unit
 ) {
     var localError by remember { mutableStateOf<String?>(null) }
@@ -3695,6 +4016,7 @@ fun FriendsScreen(
     selectedFriend: Profile?,
     friendSongs: List<SharedPlaylistSong>,
     friendSongsLoading: Boolean,
+    nowPlaying: List<NowPlaying>,
     onBack: () -> Unit,
     onBackToList: () -> Unit,
     onOpenFriend: (Profile) -> Unit,
@@ -3749,9 +4071,17 @@ fun FriendsScreen(
                     "This friend hasn't shared a playlist.",
                     modifier = Modifier.fillMaxWidth().weight(1f)
                 )
-                else -> LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                    itemsIndexed(friendSongs, key = { _, s -> s.videoId }) { idx, s ->
-                        SharedSongRow(s) { onPlayFriendSongs(idx) }
+                else -> Column(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                    Text(
+                        "Snapshot — re-share to update.",
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+                    )
+                    LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                        itemsIndexed(friendSongs, key = { _, s -> s.videoId }) { idx, s ->
+                            SharedSongRow(s) { onPlayFriendSongs(idx) }
+                        }
                     }
                 }
             }
@@ -3772,6 +4102,15 @@ fun FriendsScreen(
             )
             else -> LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 items(friends, key = { it.id }) { f ->
+                    val np = nowPlaying.firstOrNull { it.userId == f.id }
+                    val staleMs = np?.updatedAt?.let { parseIsoMs(it) }?.let {
+                        System.currentTimeMillis() - it
+                    }
+                    val subtitle = if (staleMs != null && staleMs > 2 * 60_000) {
+                        "Last seen ${formatRelative(np?.updatedAt)}"
+                    } else {
+                        f.email ?: ""
+                    }
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -3783,7 +4122,7 @@ fun FriendsScreen(
                             style = androidx.compose.material3.MaterialTheme.typography.bodyLarge
                         )
                         Text(
-                            f.email ?: "",
+                            subtitle,
                             style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                             color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -3843,7 +4182,7 @@ fun FriendsStrip(
 ) {
     if (items.isEmpty()) return
     Text(
-        "Friends are listening",
+        "Friends — last seen",
         style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
         modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp)
     )
@@ -4075,6 +4414,16 @@ fun DownloadsScreen(
     }
 }
 
+fun installUpdate(context: Context, file: File) {
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "application/vnd.android.package-archive")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(intent)
+}
+
 @Composable
 fun SettingsScreen(
     storageExternal: Boolean,
@@ -4083,6 +4432,13 @@ fun SettingsScreen(
     downloadCount: Int,
     totalBytes: Long,
     onRemoveAll: () -> Unit,
+    onClearLibrary: () -> Unit,
+    onViewPrivacyPolicy: () -> Unit,
+    notifyUpdates: Boolean,
+    onNotifyUpdatesChange: (Boolean) -> Unit,
+    accentName: String,
+    accentColor: androidx.compose.ui.graphics.Color,
+    onOpenAccentPicker: () -> Unit,
     onBack: () -> Unit,
     signedIn: Boolean = false,
     syncConfigured: Boolean = false,
@@ -4095,8 +4451,13 @@ fun SettingsScreen(
     addFriendCode: String = "",
     onAddFriendCodeChange: (String) -> Unit = {},
     onAddFriend: () -> Unit = {},
-    addFriendStatus: String? = null
+    addFriendStatus: String? = null,
+    updateState: UpdateState = UpdateState.Idle,
+    onCheckForUpdates: () -> Unit = {},
+    onDownloadUpdate: (UpdateInfo) -> Unit = {},
+    onInstallUpdate: (File) -> Unit = {}
 ) {
+    val context = LocalContext.current
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -4123,52 +4484,74 @@ fun SettingsScreen(
         }
         HorizontalDivider()
 
+        SettingsSectionHeader("About")
         Text(
-            "Account",
-            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(vertical = 12.dp)
+            "MusicApp",
+            style = androidx.compose.material3.MaterialTheme.typography.titleMedium
         )
-        if (!syncConfigured) {
-            Text(
-                "Sync isn't configured. Add SUPABASE_URL, SUPABASE_ANON_KEY and " +
-                    "GOOGLE_WEB_CLIENT_ID to secrets.properties, then rebuild.",
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        } else if (signedIn) {
-            Text(
-                "Signed in as ${accountEmail ?: "unknown"}",
-                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
-            )
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "Invite code: ${inviteCode ?: "…"}",
-                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f)
-                )
-                androidx.compose.material3.TextButton(onClick = onCopyInvite) { Text("Copy") }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Made by Saif Sirhan",
+            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "github.com/SaifSirhan/Musicapp",
+            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+            textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline,
+            modifier = Modifier.clickable {
+                openLink(context, "https://github.com/SaifSirhan/Musicapp")
             }
-            Spacer(Modifier.height(8.dp))
-            androidx.compose.material3.OutlinedButton(onClick = onSignOut) { Text("Sign out") }
-        } else {
-            Text(
-                "Not signed in. Sync with friends is off.",
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(8.dp))
-            androidx.compose.material3.Button(onClick = onSignIn) { Text("Sign in") }
-        }
-
-        Spacer(Modifier.height(12.dp))
-        HorizontalDivider()
-        Text(
-            "Friends",
-            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(vertical = 12.dp)
         )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "saifsirhan01@gmail.com",
+            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+            textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline,
+            modifier = Modifier.clickable {
+                openLink(context, "mailto:saifsirhan01@gmail.com")
+            }
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        HorizontalDivider()
+
+        // Account & Sync + Friends — only when signed in (Phase 14, unchanged).
         if (signedIn) {
+            SettingsSectionHeader("Account & Sync")
+            if (!syncConfigured) {
+                Text(
+                    "Sync isn't configured. Add SUPABASE_URL, SUPABASE_ANON_KEY and " +
+                        "GOOGLE_WEB_CLIENT_ID to secrets.properties, then rebuild.",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Text(
+                    "Signed in as ${accountEmail ?: "unknown"}",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Invite code: ${inviteCode ?: "…"}",
+                        style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    androidx.compose.material3.TextButton(onClick = onCopyInvite) { Text("Copy") }
+                }
+                Spacer(Modifier.height(8.dp))
+                androidx.compose.material3.OutlinedButton(onClick = onSignOut) { Text("Sign out") }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            SettingsSectionHeader("Friends")
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = addFriendCode,
@@ -4210,22 +4593,58 @@ fun SettingsScreen(
                     }
                 }
             }
-        } else {
+            HorizontalDivider()
+        }
+
+        // Playback — intentionally empty in 15d; gapless toggle lands here in 15e.
+        SettingsSectionHeader("Playback")
+        HorizontalDivider()
+
+        SettingsSectionHeader("Notifications")
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
-                "Sign in to manage friends.",
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                "Update available",
+                style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.weight(1f)
+            )
+            androidx.compose.material3.Switch(
+                checked = notifyUpdates,
+                onCheckedChange = onNotifyUpdatesChange
+            )
+        }
+        HorizontalDivider()
+
+        SettingsSectionHeader("Appearance")
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpenAccentPicker() }
+                .padding(vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Accent colour",
+                style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.weight(1f)
+            )
+            Box(
+                modifier = Modifier
+                    .size(20.dp)
+                    .background(accentColor, androidx.compose.foundation.shape.CircleShape)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "$accentName ▾",
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                 color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-
-        Spacer(Modifier.height(12.dp))
         HorizontalDivider()
 
-        Text(
-            "Storage",
-            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(vertical = 12.dp)
-        )
+        SettingsSectionHeader("Storage")
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -4262,23 +4681,180 @@ fun SettingsScreen(
             color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 8.dp)
         )
-
-        Spacer(Modifier.height(12.dp))
-        HorizontalDivider()
-        Text(
-            "Downloads",
-            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(vertical = 12.dp)
-        )
         Text(
             "Total: $downloadCount songs, ${formatBytes(totalBytes)}",
             style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
             color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Spacer(Modifier.height(12.dp))
-        androidx.compose.material3.OutlinedButton(onClick = onRemoveAll) {
-            Text("Remove all downloads")
+        HorizontalDivider()
+
+        SettingsSectionHeader("Updates")
+        Text(
+            "Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
+        )
+        Spacer(Modifier.height(8.dp))
+        when (val s = updateState) {
+            is UpdateState.Checking -> {
+                Text(
+                    "Checking for updates…",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            is UpdateState.Available -> {
+                Text(
+                    "Update available: ${s.info.versionName}",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
+                )
+                if (s.info.notes.isNotBlank()) {
+                    Text(
+                        s.info.notes,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = { onDownloadUpdate(s.info) }) { Text("Download update") }
+            }
+            is UpdateState.Downloading -> {
+                Text(
+                    "Downloading… ${s.percent}%",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { s.percent / 100f },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            is UpdateState.Downloaded -> {
+                Text(
+                    "Downloaded. Ready to install.",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = { onInstallUpdate(s.file) }) { Text("Install update") }
+            }
+            is UpdateState.Failed -> {
+                Text(
+                    s.message,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.error
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = onCheckForUpdates) { Text("Check for updates") }
+            }
+            is UpdateState.UpToDate -> {
+                Text(
+                    "You're up to date.",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = onCheckForUpdates) { Text("Check for updates") }
+            }
+            is UpdateState.Idle -> {
+                OutlinedButton(onClick = onCheckForUpdates) { Text("Check for updates") }
+            }
         }
+        HorizontalDivider()
+
+        SettingsSectionHeader("Privacy")
+        OutlinedButton(onClick = onViewPrivacyPolicy) { Text("View privacy policy") }
+        HorizontalDivider()
+
+        SettingsSectionHeader("Danger zone")
+        Button(
+            onClick = onClearLibrary,
+            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                containerColor = androidx.compose.material3.MaterialTheme.colorScheme.error,
+                contentColor = androidx.compose.material3.MaterialTheme.colorScheme.onError
+            ),
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Clear library") }
+        Spacer(Modifier.height(8.dp))
+        Button(
+            onClick = onRemoveAll,
+            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                containerColor = androidx.compose.material3.MaterialTheme.colorScheme.error,
+                contentColor = androidx.compose.material3.MaterialTheme.colorScheme.onError
+            ),
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Remove all downloads") }
+    }
+}
+
+@Composable
+fun SettingsSectionHeader(title: String) {
+    Text(
+        title,
+        style = androidx.compose.material3.MaterialTheme.typography.titleSmall,
+        color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 16.dp, bottom = 4.dp)
+    )
+}
+
+private fun openLink(context: Context, uri: String) {
+    runCatching {
+        context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(uri)))
+    }
+}
+
+@Composable
+fun PrivacyPolicyScreen(onBack: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                IconButton(onClick = onBack) {
+                    Text(
+                        "←",
+                        style = androidx.compose.material3.MaterialTheme.typography.headlineMedium
+                    )
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "Privacy policy",
+                style = androidx.compose.material3.MaterialTheme.typography.headlineSmall
+            )
+        }
+        HorizontalDivider()
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "MusicApp — Privacy Policy",
+            style = androidx.compose.material3.MaterialTheme.typography.titleMedium
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            """
+            MusicApp does not collect or share your personal data.
+
+            Your library, playlists, favorites, and downloads are stored only on your device.
+
+            If you sign in with Google to use friend sync, your email and the data you choose to share (invite code, shared playlists, now-playing) are stored on a Supabase database operated by the developer.
+
+            Music is streamed from YouTube via yt-dlp. yt-dlp requests go directly from your device to YouTube's servers.
+
+            No analytics, no crash reporting, no third-party tracking.
+            """.trimIndent(),
+            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
+        )
+        Spacer(Modifier.height(16.dp))
+        Text(
+            "Contact: saifsirhan01@gmail.com\ngithub.com/SaifSirhan/Musicapp",
+            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
+        )
     }
 }
 

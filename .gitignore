@@ -1,4 +1,4 @@
-﻿*.iml
+*.iml
 .gradle
 /local.properties
 /.idea
@@ -10,3 +10,5 @@
 .cxx
 local.properties
 secrets.properties
+keystore.properties
+*.jks

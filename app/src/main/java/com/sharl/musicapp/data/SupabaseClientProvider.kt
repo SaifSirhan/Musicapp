@@ -17,13 +17,25 @@ import io.github.jan.supabase.realtime.Realtime
  */
 object SupabaseClientProvider {
 
+    /**
+     * Supabase URL normalized to the project base: no trailing slash and no
+     * `/rest/v1` suffix. supabase-kt builds the module endpoints itself and throws
+     * if the URL already contains `/rest/v1` — a common copy-paste from the
+     * dashboard's REST settings.
+     */
+    private val baseUrl: String
+        get() = BuildConfig.SUPABASE_URL
+            .trim()
+            .trimEnd('/')
+            .removeSuffix("/rest/v1")
+
     val isConfigured: Boolean
-        get() = BuildConfig.SUPABASE_URL.startsWith("http") &&
+        get() = baseUrl.startsWith("http") &&
             BuildConfig.SUPABASE_ANON_KEY.isNotBlank()
 
     val client: SupabaseClient by lazy {
         createSupabaseClient(
-            supabaseUrl = BuildConfig.SUPABASE_URL,
+            supabaseUrl = baseUrl,
             supabaseKey = BuildConfig.SUPABASE_ANON_KEY
         ) {
             install(Auth)

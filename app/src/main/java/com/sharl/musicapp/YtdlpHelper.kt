@@ -82,49 +82,77 @@ object YtdlpHelper {
             }
         }
 
+    // Junk titles that are almost never a single song.
+    private val SEARCH_JUNK = listOf(
+        "mix", "playlist", "compilation", "1 hour", "10 hours",
+        "full album", "livestream", "podcast"
+    )
+
+    // Titles containing one of these are promoted to the top (not required).
+    private val SEARCH_PREFERRED = listOf(
+        "official audio", "official video", "lyrics", "audio", "music video"
+    )
+
+    private const val MIN_DURATION_MS = 45_000L
+    private const val MAX_DURATION_MS = 12L * 60 * 1000
+
     suspend fun searchYouTube(
         context: Context,
         query: String,
-        limit: Int = 5
+        limit: Int = 10
     ): List<SearchResult> =
         withContext(Dispatchers.IO) {
             ensureInitialized(context)
 
-            // Uses yt-dlp's own printf()-style output template rather than --dump-json:
-            // one flat "title|id|url" line per entry, no JSON parsing and no new
-            // dependency. Literal pipe/percent chars are escaped at template level.
-            val request = YoutubeDLRequest("ytsearch$limit:$query").apply {
-                addOption(
-                    "--print",
-                    "%(title)s|%(id)s|%(webpage_url)s"
-                )
+            // --flat-playlist pulls metadata for each entry without visiting its
+            // page (~2s vs ~11s), and --dump-single-json gives one parseable object.
+            // We pull 20 and filter down client-side.
+            val request = YoutubeDLRequest("ytsearch20:$query").apply {
                 addOption("--flat-playlist")
+                addOption("--dump-single-json")
                 addOption("--no-update")
                 addOption("--no-warnings")
             }
 
             val response = YoutubeDL.getInstance().execute(request)
-
             Log.d("YTDL", "search raw out:\n${response.out}")
             Log.d("YTDL", "search raw err:\n${response.err}")
 
-            response.out
-                .lineSequence()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .mapNotNull { line ->
-                    val parts = line.split("|", limit = 3)
-                    if (parts.size < 3) return@mapNotNull null
-                    val videoId = parts[1].trim()
-                    if (videoId.isEmpty()) return@mapNotNull null
-                    SearchResult(
-                        title = parts[0].trim(),
-                        videoId = videoId,
-                        url = parts[2].trim()
-                    )
+            val entries = try {
+                val start = response.out.indexOf('{')
+                val root = org.json.JSONObject(response.out.substring(start.coerceAtLeast(0)))
+                root.optJSONArray("entries") ?: org.json.JSONArray()
+            } catch (e: Exception) {
+                Log.e("YTDL", "search JSON parse failed: ${e.message}")
+                org.json.JSONArray()
+            }
+
+            data class Raw(val title: String, val videoId: String, val url: String, val durationMs: Long)
+            val raw = ArrayList<Raw>(entries.length())
+            for (i in 0 until entries.length()) {
+                val e = entries.optJSONObject(i) ?: continue
+                val videoId = e.optString("id").ifBlank { e.optString("url") }
+                if (videoId.isBlank()) continue
+                val durationMs = if (e.has("duration") && !e.isNull("duration")) {
+                    (e.optDouble("duration", -1.0) * 1000).toLong()
+                } else -1L
+                raw += Raw(
+                    title = e.optString("title"),
+                    videoId = videoId,
+                    url = "https://www.youtube.com/watch?v=$videoId",
+                    durationMs = durationMs
+                )
+            }
+
+            val cap = limit.coerceAtMost(10)
+            raw
+                .filter { it.durationMs in MIN_DURATION_MS..MAX_DURATION_MS }
+                .filter { r -> SEARCH_JUNK.none { r.title.contains(it, ignoreCase = true) } }
+                .sortedByDescending { r ->
+                    if (SEARCH_PREFERRED.any { r.title.contains(it, ignoreCase = true) }) 1 else 0
                 }
-                .take(limit)
-                .toList()
+                .take(cap)
+                .map { SearchResult(title = it.title, videoId = it.videoId, url = it.url) }
         }
 
     suspend fun extractAudioUrlForId(context: Context, videoId: String): String? =

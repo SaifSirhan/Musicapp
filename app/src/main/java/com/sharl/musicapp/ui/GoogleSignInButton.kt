@@ -1,5 +1,7 @@
 package com.sharl.musicapp.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
@@ -12,6 +14,11 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.NoCredentialException
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInClient
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.ApiException
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.sharl.musicapp.BuildConfig
@@ -25,12 +32,38 @@ import java.security.SecureRandom
  */
 @Composable
 fun GoogleSignInButton(
-    onIdToken: (idToken: String, rawNonce: String) -> Unit,
+    onIdToken: (idToken: String, rawNonce: String?) -> Unit,
     onError: (String) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember { CredentialManager.create(context) }
+
+    val legacyClient: GoogleSignInClient = remember {
+        val options = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            .requestIdToken(BuildConfig.GOOGLE_WEB_CLIENT_ID)
+            .requestEmail()
+            .build()
+        GoogleSignIn.getClient(context, options)
+    }
+
+    val legacyLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
+        try {
+            val account = task.getResult(ApiException::class.java)
+            val token = account?.idToken
+            if (token.isNullOrBlank()) {
+                onError("Google sign-in returned no ID token.")
+            } else {
+                onIdToken(token, null)
+            }
+        } catch (e: ApiException) {
+            android.util.Log.e("GSI", "legacy sign-in failed status=${e.statusCode}: ${e.message}", e)
+            onError("Legacy sign-in failed (${e.statusCode}): ${e.message ?: "no message"}")
+        }
+    }
 
     Button(
         onClick = {
@@ -60,10 +93,20 @@ fun GoogleSignInButton(
                     } else {
                         onError("Unexpected credential type returned.")
                     }
+                } catch (e: NoCredentialException) {
+                    // Credential Manager can't see a Google account on this device (common on
+                    // some Honor/Huawei builds). Fall back to the legacy Google Sign-In flow.
+                    android.util.Log.e("GSI", "NoCredentialException: ${e.message} — falling back to legacy Google Sign-In", e)
+                    e.cause?.let { android.util.Log.e("GSI", "caused by ${it.javaClass.name}: ${it.message}", it) }
+                    runCatching { legacyLauncher.launch(legacyClient.signInIntent) }
+                        .onFailure { onError("Legacy sign-in could not start: ${it.message}") }
                 } catch (e: GetCredentialException) {
-                    onError(e.message ?: "Google sign-in failed.")
+                    android.util.Log.e("GSI", "${e.javaClass.simpleName}: ${e.message}", e)
+                    e.cause?.let { android.util.Log.e("GSI", "caused by ${it.javaClass.name}: ${it.message}", it) }
+                    onError("${e.javaClass.simpleName}: ${e.message ?: "no message"}")
                 } catch (e: Exception) {
-                    onError(e.message ?: "Google sign-in failed.")
+                    android.util.Log.e("GSI", "unexpected ${e.javaClass.name}: ${e.message}", e)
+                    onError("${e.javaClass.simpleName}: ${e.message ?: "Google sign-in failed."}")
                 }
             }
         },

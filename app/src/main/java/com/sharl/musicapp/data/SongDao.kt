@@ -26,6 +26,9 @@ interface SongDao {
     @Query("UPDATE songs SET isHidden = 1 WHERE videoId = :videoId")
     suspend fun hide(videoId: String)
 
+    @Query("DELETE FROM songs")
+    suspend fun clearAll()
+
     @Query("SELECT * FROM songs WHERE isFavorite = 1 AND isHidden = 0 ORDER BY lastPlayedAt DESC")
     fun favorites(): Flow<List<Song>>
 

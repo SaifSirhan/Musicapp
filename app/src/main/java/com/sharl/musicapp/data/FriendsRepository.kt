@@ -1,5 +1,15 @@
 package com.sharl.musicapp.data
 
+// v1 known limitations (deferred to Phase 14b/14c — not bugs):
+// - No offline write queue: a failed share throws and the user retries manually.
+// - Shared playlists are snapshots: adding songs locally does NOT propagate;
+//   re-share to push a new copy.
+// - No friend-request accept/deny: entering an invite code creates the
+//   friendship immediately.
+// - No push notifications: the strip / friend view only refreshes while the app
+//   is foregrounded (Realtime channel is torn down on background).
+// - Supabase free tier pauses projects after 7 days of inactivity.
+
 import android.content.Context
 import com.sharl.musicapp.data.SupabaseClientProvider
 import io.github.jan.supabase.postgrest.from

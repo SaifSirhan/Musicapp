@@ -29,11 +29,13 @@ class AuthRepository {
     fun currentUserEmail(): String? =
         if (!configured) null else SupabaseClientProvider.client.auth.currentSessionOrNull()?.user?.email
 
-    suspend fun signInWithGoogle(idToken: String, rawNonce: String) {
+    suspend fun signInWithGoogle(idToken: String, rawNonce: String?) {
         check(configured) { "Sync is not configured (missing SUPABASE_URL / SUPABASE_ANON_KEY)." }
         SupabaseClientProvider.client.auth.signInWith(IDToken) {
             this.idToken = idToken
             this.provider = Google
+            // Null for the legacy Google Sign-In path: that token carries no nonce claim,
+            // so Supabase must not be handed one to compare against.
             this.nonce = rawNonce
         }
     }

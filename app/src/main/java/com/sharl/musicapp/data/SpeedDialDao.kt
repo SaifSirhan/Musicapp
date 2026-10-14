@@ -14,6 +14,9 @@ interface SpeedDialDao {
     @Query("DELETE FROM speed_dial_slots WHERE position = :pos")
     suspend fun clear(pos: Int)
 
+    @Query("DELETE FROM speed_dial_slots")
+    suspend fun clearAll()
+
     @Query("SELECT COUNT(*) FROM speed_dial_slots")
     suspend fun count(): Int
 }
