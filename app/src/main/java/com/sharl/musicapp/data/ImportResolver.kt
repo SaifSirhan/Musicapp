@@ -9,6 +9,7 @@ import com.yausername.youtubedl_android.YoutubeDL.UpdateChannel
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -17,6 +18,7 @@ import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.coroutines.coroutineContext
 
 class ImportResolver(private val context: Context) {
 
@@ -277,6 +279,7 @@ class ImportResolver(private val context: Context) {
         val total = tracks.size
         onProgress(0, total)
         for ((i, track) in tracks.withIndex()) {
+            coroutineContext.ensureActive()
             val query = listOf(track.artist, track.title)
                 .filter { it.isNotBlank() }
                 .joinToString(" ")

@@ -2,9 +2,13 @@ package com.sharl.musicapp.data
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.cancellation.CancellationException
 
 sealed class ImportState {
     object Idle : ImportState()
@@ -20,7 +24,10 @@ class ImportRepository(private val context: Context) {
     private val _state = MutableStateFlow<ImportState>(ImportState.Idle)
     val state: StateFlow<ImportState> = _state
 
-    suspend fun preview(source: ImportSource): ImportPreview {
+    private var currentJob: Job? = null
+
+    suspend fun preview(source: ImportSource, job: Job? = null): ImportPreview {
+        currentJob = job
         _state.value = ImportState.Resolving(0, 0)
         return try {
             val result = ImportResolver(context).resolve(source) { done, total ->
@@ -28,6 +35,9 @@ class ImportRepository(private val context: Context) {
             }
             _state.value = ImportState.Previewing(result)
             result
+        } catch (e: CancellationException) {
+            _state.value = ImportState.Idle
+            throw e
         } catch (e: Exception) {
             _state.value = ImportState.Error(e.message ?: "Import failed.")
             ImportPreview(sourceName = "", tracks = emptyList())
@@ -43,6 +53,7 @@ class ImportRepository(private val context: Context) {
             val playlistId = playlistRepo.create(preview.sourceName)
             var imported = 0
             for ((i, track) in preview.tracks.withIndex()) {
+                currentCoroutineContext().ensureActive()
                 val vid = track.videoId
                 if (vid != null) {
                     if (songDao.getById(vid) == null) {
@@ -66,10 +77,19 @@ class ImportRepository(private val context: Context) {
             }
             _state.value = ImportState.Done(playlistId, imported, preview.unresolved.size)
             playlistId
+        } catch (e: CancellationException) {
+            _state.value = ImportState.Idle
+            throw e
         } catch (e: Exception) {
             _state.value = ImportState.Error(e.message ?: "Import failed.")
             -1L
         }
+    }
+
+    fun cancel() {
+        currentJob?.cancel()
+        currentJob = null
+        _state.value = ImportState.Idle
     }
 
     fun reset() {

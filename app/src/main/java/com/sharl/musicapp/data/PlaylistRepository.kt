@@ -8,7 +8,7 @@ class PlaylistRepository(context: Context) {
 
     suspend fun create(name: String) = dao.createPlaylist(Playlist(name = name))
     fun all() = dao.allPlaylists()
-    suspend fun delete(id: Long) { dao.deletePlaylist(id); dao.clearPlaylistSongs(id) }
+    suspend fun delete(id: Long) { dao.deletePlaylistWithSongs(id) }
 
     suspend fun rename(id: Long, newName: String) {
         dao.rename(id, newName)

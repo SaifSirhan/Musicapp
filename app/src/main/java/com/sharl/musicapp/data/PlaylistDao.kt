@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -21,7 +22,10 @@ interface PlaylistDao {
     suspend fun deletePlaylist(id: Long)
 
     @Query("DELETE FROM playlists")
-    suspend fun clearAll()
+    suspend fun clearAllPlaylists()
+
+    @Query("DELETE FROM playlist_songs")
+    suspend fun clearAllPlaylistSongs()
 
     @Query("DELETE FROM playlist_songs WHERE playlistId = :id")
     suspend fun clearPlaylistSongs(id: Long)
@@ -37,4 +41,26 @@ interface PlaylistDao {
 
     @Query("SELECT COUNT(*) FROM playlist_songs WHERE playlistId = :playlistId")
     suspend fun countSongs(playlistId: Long): Int
+
+    /**
+     * Atomically wipe every playlist and every playlist_songs row so that no
+     * orphaned playlist_songs entries are left behind after the parent
+     * playlists table is cleared.
+     */
+    @Transaction
+    suspend fun clearAll() {
+        clearAllPlaylistSongs()
+        clearAllPlaylists()
+    }
+
+    /**
+     * Atomically delete a single playlist together with all of its
+     * playlist_songs rows, avoiding the orphaned-row bug caused by two
+     * independent non-transactional DAO calls.
+     */
+    @Transaction
+    suspend fun deletePlaylistWithSongs(id: Long) {
+        clearPlaylistSongs(id)
+        deletePlaylist(id)
+    }
 }

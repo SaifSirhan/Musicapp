@@ -1,6 +1,7 @@
 package com.sharl.musicapp
 
 import android.util.Log
+import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -42,12 +43,22 @@ class PlaybackService : MediaSessionService() {
                 Log.d("ISLAND", "title=${mediaMetadata.title} artist=${mediaMetadata.artist}")
             }
 
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // The UI tags every MediaItem with its queue index in the
+                // request-metadata extras so we can report exactly which track
+                // the playlist advanced to (gapless auto-advance or seek).
+                val idx = mediaItem?.requestMetadata?.extras?.getInt("queue_index", -1) ?: -1
+                if (idx >= 0) {
+                    QueueAdvanceSignaler.notifyTrackChanged(idx)
+                }
+            }
+
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_ENDED) {
-                    // Signal the UI to advance the in-memory queue. The service
-                    // can't call MainActivity's playNext directly, so it goes
-                    // through a shared in-process singleton.
-                    QueueAdvanceSignaler.notifyTrackEnded()
+                    // The loaded window is exhausted (no next item and repeat
+                    // off). Tell the UI to load the next batch / handle repeat.
+                    QueueAdvanceSignaler.notifyQueueEnded()
+                    QueueAdvanceSignaler.notifyTrackEnded() // legacy
                 }
             }
         })
