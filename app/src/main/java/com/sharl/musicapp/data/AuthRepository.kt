@@ -12,6 +12,14 @@ import kotlinx.coroutines.flow.map
 
 class AuthRepository {
 
+    /**
+     * Scope for YouTube Music account imports. The Credential Manager flow used
+     * for Supabase sign-in only yields an ID token, so this scope is requested
+     * separately through the Google Identity Authorization API (see
+     * ImportAccountScreen) and its access token is kept in SettingsRepo.
+     */
+    val youtubeScope: String = YtmImporter.YOUTUBE_SCOPE
+
     /** False until SUPABASE_URL / SUPABASE_ANON_KEY are filled in (secrets.properties). */
     val configured: Boolean get() = SupabaseClientProvider.isConfigured
 

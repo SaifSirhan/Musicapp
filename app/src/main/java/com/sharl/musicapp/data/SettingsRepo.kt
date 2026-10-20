@@ -17,6 +17,32 @@ class SettingsRepo(context: Context) {
         get() = prefs.getBoolean("notify_updates", true)
         set(v) { prefs.edit().putBoolean("notify_updates", v).apply() }
 
+    // OAuth access token for the YouTube Data API (account import). Google
+    // access tokens live ~1h; storedAt lets us treat stale ones as missing.
+    var googleAccessToken: String
+        get() = prefs.getString("google_access_token", "").orEmpty()
+        set(v) {
+            prefs.edit()
+                .putString("google_access_token", v)
+                .putLong("google_access_token_at", System.currentTimeMillis())
+                .apply()
+        }
+
+    var googleAccessTokenAt: Long
+        get() = prefs.getLong("google_access_token_at", 0L)
+        set(v) { prefs.edit().putLong("google_access_token_at", v).apply() }
+
+    fun hasFreshGoogleToken(): Boolean =
+        googleAccessToken.isNotBlank() &&
+            System.currentTimeMillis() - googleAccessTokenAt < 50 * 60 * 1000L
+
+    fun clearGoogleAccessToken() {
+        prefs.edit()
+            .remove("google_access_token")
+            .remove("google_access_token_at")
+            .apply()
+    }
+
     fun downloadDir(context: Context): java.io.File {
         val base = if (storageExternal) context.getExternalFilesDir(null)
                    else context.filesDir
