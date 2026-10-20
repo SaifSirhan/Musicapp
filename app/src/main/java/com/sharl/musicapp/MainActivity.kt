@@ -27,7 +27,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
@@ -50,13 +49,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -185,6 +184,9 @@ fun PlayerScreen(
 
     var queue by remember { mutableStateOf<List<QueueItem>>(emptyList()) }
     var queueIndex by remember { mutableStateOf(-1) }
+    // In-flight queue rebuild. A new play request cancels it so rapid skips
+    // can't race two setMediaItems calls against a stale queue index.
+    var playJob by remember { mutableStateOf<Job?>(null) }
     // Queue index that maps to player position 0 of the currently loaded
     // MediaItem window. The player only ever holds a contiguous slice
     // [windowStart .. windowStart + mediaItemCount - 1] of [queue].
@@ -614,6 +616,7 @@ fun PlayerScreen(
     // player position p maps to queue index (windowStart + p).
     fun syncPlayerWindow(currentIndex: Int) {
         val c = controller ?: return
+        if (currentIndex < 0 || queue.isEmpty()) return
         var nextToLoad = windowStart + c.mediaItemCount
         while (nextToLoad <= currentIndex + PRELOAD_AHEAD && nextToLoad < queue.size) {
             val q = queue[nextToLoad]
@@ -662,13 +665,19 @@ fun PlayerScreen(
             return
         }
         if (index !in items.indices) return
+        // Supersede any in-flight rebuild: rapid Next taps must not leave two
+        // setMediaItems calls racing against different queue indices.
+        playJob?.cancel()
         queue = items
         queueIndex = index
         val item = items[index]
         status = "Extracting..."
-        scope.launch {
+        playJob = scope.launch {
             try {
                 val result = extractOrCache(item.videoId)
+                // A superseded request may finish extraction after cancellation;
+                // never apply its stale window.
+                ensureActive()
                 if (result == null) {
                     status = "Error: extraction returned null"
                     return@launch
@@ -697,15 +706,16 @@ fun PlayerScreen(
 
                 // Warm the cache for the upcoming tracks, then extend the loaded
                 // window with whatever became available so the next transitions
-                // are gapless too. Fire-and-forget; serialized via extractMutex.
+                // are gapless too. Serialized via extractMutex.
                 val upcoming = (index + 1..index + PRELOAD_AHEAD)
                     .filter { it < items.size }
-                scope.launch {
-                    upcoming.forEach { idx ->
-                        preExtract(items[idx].videoId)
-                        syncPlayerWindow(queueIndex)
-                    }
+                for (idx in upcoming) {
+                    ensureActive()
+                    preExtract(items[idx].videoId)
+                    syncPlayerWindow(queueIndex)
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 val msg = e.message ?: "unknown error"
                 Log.e("YTDL", "Failed: $msg")
@@ -791,6 +801,26 @@ fun PlayerScreen(
         val item = QueueItem(song.videoId, song.title)
         queue = queue + item
         status = "Added to queue: ${song.title}"
+        // Appending leaves existing indices intact; let the window pick it up
+        // once it resolves.
+        syncPlayerWindow(queueIndex)
+    }
+
+    // "Play next" inserts mid-queue, shifting the queue index of every loaded
+    // MediaItem after the insertion point. Drop the stale tail and re-add it
+    // from the new queue so the queue_index tags match again. The current item
+    // and playback position are untouched (no prepare/reset).
+    fun relinkPlayerWindowTail() {
+        val c = controller ?: return
+        if (queueIndex < 0) return
+        val currentPos = c.currentMediaItemIndex
+        if (currentPos < 0) return
+        val suffixStart = currentPos + 1
+        if (c.mediaItemCount > suffixStart) {
+            c.removeMediaItems(suffixStart, c.mediaItemCount)
+        }
+        windowStart = queueIndex - currentPos
+        syncPlayerWindow(queueIndex)
     }
 
     fun insertIntoQueueNext(song: Song) {
@@ -803,6 +833,14 @@ fun PlayerScreen(
         val insertAt = queueIndex + 1
         queue = queue.toMutableList().apply { add(insertAt, item) }
         status = "Playing next: ${song.title}"
+        // Let any in-flight rebuild finish first so we relink the final window,
+        // then resolve the inserted track and refresh the tail.
+        val pending = playJob
+        scope.launch {
+            pending?.join()
+            preExtract(item.videoId)
+            relinkPlayerWindowTail()
+        }
     }
 
     fun onSpeedDialTap(slot: SpeedDialSlot?, position: Int) {

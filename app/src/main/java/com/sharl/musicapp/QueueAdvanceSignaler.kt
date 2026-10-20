@@ -14,7 +14,9 @@ import kotlinx.coroutines.flow.asSharedFlow
  *    i.e. the loaded window is exhausted and the UI must load the next batch.
  */
 object QueueAdvanceSignaler {
-    private val _trackChanged = MutableSharedFlow<Int>(extraBufferCapacity = 4)
+    // Buffered generously so a burst of rapid skips (each native transition
+    // emits one index) can't drop an update and leave the UI index stale.
+    private val _trackChanged = MutableSharedFlow<Int>(extraBufferCapacity = 32)
     val trackChanged: SharedFlow<Int> = _trackChanged.asSharedFlow()
 
     private val _queueEnded = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
