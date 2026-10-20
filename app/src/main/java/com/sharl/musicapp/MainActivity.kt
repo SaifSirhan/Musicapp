@@ -72,6 +72,8 @@ import com.sharl.musicapp.data.Download
 import com.sharl.musicapp.data.DownloadRepository
 import com.sharl.musicapp.data.FriendsRepository
 import com.sharl.musicapp.data.ImportRepository
+import com.sharl.musicapp.data.InnerTubeHelper
+import com.sharl.musicapp.data.ResolutionStats
 import com.sharl.musicapp.data.NewDropsRepository
 import com.sharl.musicapp.data.NowPlaying
 import com.sharl.musicapp.data.PlaybackCache
@@ -214,6 +216,8 @@ fun PlayerScreen(
     val urlCache = remember { mutableStateMapOf<String, Pair<String, SongMetadata>>() }
     var loadingVideoId by remember { mutableStateOf<String?>(null) }
     val extractMutex = remember { Mutex() }
+    var innerTubeFailCount by remember { mutableStateOf(ResolutionStats.innerTubeFailCount(context)) }
+    var fastEngine by remember { mutableStateOf(ResolutionStats.lastWasFast(context)) }
 
     LaunchedEffect(Unit) { PlaybackCache.init(context) }
 
@@ -486,17 +490,46 @@ fun PlayerScreen(
         }
     }
 
+    // Triple hybrid: InnerTube first (fast, ~200ms), yt-dlp as the safety net.
+    // Metadata comes from the library row, or the queue title when the row
+    // doesn't exist yet (search-and-play inserts it only after resolution).
+    suspend fun resolveRemote(
+        videoId: String,
+        fallbackTitle: String? = null
+    ): Pair<String, SongMetadata>? {
+        val started = System.currentTimeMillis()
+        val song = runCatching { repo.get(videoId) }.getOrNull()
+        val title = song?.title ?: fallbackTitle ?: videoId
+        val fast = InnerTubeHelper.getStreamUrl(videoId)
+        if (fast != null) {
+            ResolutionStats.recordFast(context)
+            fastEngine = true
+            Log.d("RESOLVE", "InnerTube hit for $videoId in ${System.currentTimeMillis() - started}ms")
+            return fast to SongMetadata(
+                title = title,
+                artist = song?.artist ?: "",
+                album = song?.album,
+                thumbnailUrl = song?.thumbnailUrl ?: youtubeThumb(videoId)
+            )
+        }
+        Log.w("RESOLVE", "InnerTube failed, falling back to yt-dlp ($videoId)")
+        ResolutionStats.recordFallback(context)
+        innerTubeFailCount += 1
+        fastEngine = false
+        return YtdlpHelper.extractUrlAndMetadata(context, videoId)
+    }
+
     // Fire-and-forget background extraction into the cache. Never plays, never
     // blocks UI, swallows errors. Serialized against user-initiated extraction
     // via the shared mutex so only one yt-dlp process runs at a time.
-    suspend fun preExtract(videoId: String) {
+    suspend fun preExtract(videoId: String, title: String? = null) {
         if (videoId.isBlank()) return
         if (PlaybackCache.get(videoId) != null) return
         if (downloadRepo.get(videoId)?.let { java.io.File(it.filePath).exists() } == true) return
         extractMutex.withLock {
             if (PlaybackCache.get(videoId) != null) return@withLock
             try {
-                val pre = YtdlpHelper.extractUrlAndMetadata(context, videoId)
+                val pre = resolveRemote(videoId, title)
                 if (pre != null) {
                     val (u, m) = pre
                     PlaybackCache.put(videoId, u, m.title, m.artist, m.album, m.thumbnailUrl)
@@ -514,10 +547,10 @@ fun PlayerScreen(
         forYouRecent.firstOrNull()?.videoId,
         forYouTop.firstOrNull()?.videoId
     ) {
-        (forYouRecent.firstOrNull() ?: forYouTop.firstOrNull())?.videoId?.let { preExtract(it) }
+        (forYouRecent.firstOrNull() ?: forYouTop.firstOrNull())?.let { preExtract(it.videoId, it.title) }
     }
 
-    suspend fun extractOrCache(videoId: String): Pair<String, SongMetadata>? {
+    suspend fun extractOrCache(videoId: String, fallbackTitle: String? = null): Pair<String, SongMetadata> {
         // Offline short-circuit: a downloaded song resolves to its local file,
         // no network / no yt-dlp re-extraction.
         downloadRepo.get(videoId)?.let { row ->
@@ -545,17 +578,16 @@ fun PlayerScreen(
                 thumbnailUrl = c.thumbnailUrl
             )
         }
-        // 3. Cold extract — surface a loading state and serialize yt-dlp.
+        // 3. Cold extract — InnerTube first, yt-dlp fallback; serialized so only
+        // one resolver runs at a time.
         loadingVideoId = videoId
         try {
             val result = extractMutex.withLock {
-                YtdlpHelper.extractUrlAndMetadata(context, videoId)
-            }
-            if (result != null) {
-                val (u, m) = result
-                PlaybackCache.put(videoId, u, m.title, m.artist, m.album, m.thumbnailUrl)
-                urlCache[videoId] = result
-            }
+                resolveRemote(videoId, fallbackTitle)
+            } ?: throw java.io.IOException("No stream URL for $videoId")
+            val (u, m) = result
+            PlaybackCache.put(videoId, u, m.title, m.artist, m.album, m.thumbnailUrl)
+            urlCache[videoId] = result
             return result
         } finally {
             if (loadingVideoId == videoId) loadingVideoId = null
@@ -712,14 +744,10 @@ fun PlayerScreen(
         if (downloadAhead) downloadSuggestions(items, index + 1)
         playJob = scope.launch {
             try {
-                val result = extractOrCache(item.videoId)
+                val result = extractOrCache(item.videoId, item.title)
                 // A superseded request may finish extraction after cancellation;
                 // never apply its stale window.
                 ensureActive()
-                if (result == null) {
-                    status = "Error: extraction returned null"
-                    return@launch
-                }
                 val (url, meta) = result
 
                 // Build the initial MediaItem window: the current track plus any
@@ -749,7 +777,7 @@ fun PlayerScreen(
                     .filter { it < items.size }
                 for (idx in upcoming) {
                     ensureActive()
-                    preExtract(items[idx].videoId)
+                    preExtract(items[idx].videoId, items[idx].title)
                     syncPlayerWindow(queueIndex)
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -758,6 +786,9 @@ fun PlayerScreen(
                 val msg = e.message ?: "unknown error"
                 Log.e("YTDL", "Failed: $msg")
                 status = "Error: $msg"
+                snackbarHostState.showSnackbar(
+                    "Couldn't play this track. Check your connection and try again."
+                )
             }
         }
     }
@@ -811,7 +842,7 @@ fun PlayerScreen(
                 .filter { it < queue.size }
             scope.launch {
                 upcoming.forEach { idx ->
-                    preExtract(queue[idx].videoId)
+                    preExtract(queue[idx].videoId, queue[idx].title)
                     syncPlayerWindow(queueIndex)
                 }
             }
@@ -876,7 +907,7 @@ fun PlayerScreen(
         val pending = playJob
         scope.launch {
             pending?.join()
-            preExtract(item.videoId)
+            preExtract(item.videoId, item.title)
             relinkPlayerWindowTail()
         }
     }
@@ -1136,6 +1167,8 @@ fun PlayerScreen(
                 },
                 addFriendStatus = addFriendStatus,
                 updateState = updateState,
+                fastEngine = fastEngine,
+                innerTubeFailCount = innerTubeFailCount,
                 onCheckForUpdates = { scope.launch { updateRepo.check() } },
                 onDownloadUpdate = { info -> scope.launch { updateRepo.download(info) } },
                 onInstallUpdate = { file -> installUpdate(context, file) }

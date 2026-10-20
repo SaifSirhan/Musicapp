@@ -72,6 +72,8 @@ fun SettingsScreen(
     onAddFriend: () -> Unit = {},
     addFriendStatus: String? = null,
     updateState: UpdateState = UpdateState.Idle,
+    fastEngine: Boolean = true,
+    innerTubeFailCount: Int = 0,
     onCheckForUpdates: () -> Unit = {},
     onDownloadUpdate: (UpdateInfo) -> Unit = {},
     onInstallUpdate: (File) -> Unit = {}
@@ -326,6 +328,20 @@ fun SettingsScreen(
             "Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
             style = MaterialTheme.typography.bodyMedium
         )
+        Text(
+            "Playback engine: ${if (fastEngine) "Fast" else "Slow (Fallback)"}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        if (innerTubeFailCount > 5) {
+            Text(
+                "Fast extraction is failing. Check for updates.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
         Spacer(Modifier.height(8.dp))
         when (val s = updateState) {
             is UpdateState.Checking -> {

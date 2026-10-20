@@ -101,7 +101,10 @@ fun ColumnScope.SearchTab(
         onSearchingChange(true)
         try {
             val t0 = android.os.SystemClock.elapsedRealtime()
+            // yt-dlp occasionally repeats an entry; the results list keys by
+            // videoId, and duplicate keys crash Compose.
             val found = YtdlpHelper.searchYouTube(context, trimmed)
+                .distinctBy { it.videoId }
             Log.d("YTDL", "search '${trimmed}' took ${android.os.SystemClock.elapsedRealtime() - t0}ms")
             if (query.trim() == trimmed) {
                 onResultsChange(found)
@@ -169,7 +172,7 @@ fun ColumnScope.SearchTab(
                     modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 8.dp)
                 )
             }
-            items(localMatches, key = { it.videoId }) { song ->
+            items(localMatches, key = { "local:${it.videoId}" }) { song ->
                 SongRow(
                     song = song,
                     onClick = {
@@ -195,7 +198,7 @@ fun ColumnScope.SearchTab(
             }
         }
         val items = results.map { QueueItem(it.videoId, it.title) }
-        itemsIndexed(results, key = { _, result -> result.videoId }) { idx, result ->
+        itemsIndexed(results, key = { _, result -> "yt:${result.videoId}" }) { idx, result ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
