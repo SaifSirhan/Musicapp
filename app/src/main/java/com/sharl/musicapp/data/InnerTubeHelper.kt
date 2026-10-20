@@ -3,9 +3,17 @@ package com.sharl.musicapp.data
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+
+data class RelatedVideo(
+    val videoId: String,
+    val title: String,
+    val artist: String,
+    val thumbnailUrl: String?
+)
 
 object InnerTubeHelper {
     // NOTE TO DEV: These constants are what YouTube changes. If InnerTube starts failing,
@@ -90,4 +98,194 @@ object InnerTubeHelper {
         }
         return null
     }
+
+    // Related videos for the Mix engine. The WEB client answers with the modern
+    // lockupViewModel layout, ANDROID_VR with compactVideoRenderer; both lists are
+    // merged (they overlap heavily) to squeeze out as many unique tracks as possible.
+    suspend fun getRelatedVideos(videoId: String): List<RelatedVideo> =
+        withContext(Dispatchers.IO) {
+            val out = LinkedHashMap<String, RelatedVideo>()
+            fetchNext(videoId, WEB_CONTEXT, "Mozilla/5.0")?.let { json ->
+                parseWebRelated(json).forEach { out.putIfAbsent(it.videoId, it) }
+            }
+            fetchNext(videoId, VR_CONTEXT, USER_AGENT)?.let { json ->
+                parseVrRelated(json).forEach { out.putIfAbsent(it.videoId, it) }
+            }
+            out.values.toList()
+        }
+
+    private val WEB_CONTEXT =
+        "\"clientName\":\"WEB\",\"clientVersion\":\"2.20250101.00.00\""
+    private val VR_CONTEXT =
+        "\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"$CLIENT_VERSION\"," +
+            "\"androidSdkVersion\":32,\"osName\":\"Android\",\"osVersion\":\"12\""
+
+    private fun fetchNext(videoId: String, clientJson: String, userAgent: String): JSONObject? {
+        return try {
+            val url = URL("https://www.youtube.com/youtubei/v1/next?key=$API_KEY")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("User-Agent", userAgent)
+            conn.connectTimeout = 5000
+            conn.readTimeout = 8000
+            conn.doOutput = true
+            val body = """{"context":{"client":{$clientJson}},"videoId":"$videoId"}"""
+            conn.outputStream.write(body.toByteArray())
+            if (conn.responseCode == 200) {
+                JSONObject(conn.inputStream.bufferedReader().readText())
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            Log.e("InnerTube", "next failed", e)
+            null
+        }
+    }
+
+    // contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results[]
+    private fun parseWebRelated(json: JSONObject): List<RelatedVideo> {
+        val results = json.optJSONObject("contents")
+            ?.optJSONObject("twoColumnWatchNextResults")
+            ?.optJSONObject("secondaryResults")
+            ?.optJSONObject("secondaryResults")
+            ?.optJSONArray("results") ?: return emptyList()
+        val list = ArrayList<RelatedVideo>()
+        for (i in 0 until results.length()) {
+            val lockup = results.optJSONObject(i)?.optJSONObject("lockupViewModel") ?: continue
+            if (lockup.optString("contentType") != "LOCKUP_CONTENT_TYPE_VIDEO") continue
+            val id = lockup.optString("contentId")
+            if (id.isBlank()) continue
+            val meta = lockup.optJSONObject("metadata")?.optJSONObject("lockupMetadataViewModel")
+            val title = meta?.optJSONObject("title")?.optString("content").orEmpty()
+            val rows = meta?.optJSONObject("metadata")
+                ?.optJSONObject("contentMetadataViewModel")
+                ?.optJSONArray("metadataRows")
+            val artist = rows?.optJSONObject(0)?.optJSONArray("metadataParts")
+                ?.optJSONObject(0)?.optJSONObject("text")?.optString("content").orEmpty()
+            val thumb = lockup.optJSONObject("contentImage")
+                ?.optJSONObject("thumbnailViewModel")
+                ?.optJSONObject("image")
+                ?.optJSONArray("sources")
+                ?.optJSONObject(0)?.optString("url")
+            list += RelatedVideo(id, title, artist, thumb?.takeIf { it.isNotBlank() })
+        }
+        return list
+    }
+
+    // ...results.watchNextTabbedResultsRenderer.tabs[1]...itemSectionRenderer.contents[]
+    private fun parseVrRelated(json: JSONObject): List<RelatedVideo> {
+        val tabs = json.optJSONObject("contents")
+            ?.optJSONObject("singleColumnWatchNextResults")
+            ?.optJSONObject("results")
+            ?.optJSONObject("watchNextTabbedResultsRenderer")
+            ?.optJSONArray("tabs") ?: return emptyList()
+        val list = ArrayList<RelatedVideo>()
+        for (t in 0 until tabs.length()) {
+            val contents = tabs.optJSONObject(t)
+                ?.optJSONObject("tabRenderer")
+                ?.optJSONObject("content")
+                ?.optJSONObject("sectionListRenderer")
+                ?.optJSONArray("contents") ?: continue
+            for (s in 0 until contents.length()) {
+                val items = contents.optJSONObject(s)
+                    ?.optJSONObject("itemSectionRenderer")
+                    ?.optJSONArray("contents") ?: continue
+                appendRenderers(items, list)
+            }
+        }
+        return list
+    }
+
+    private fun appendRenderers(items: JSONArray, out: MutableList<RelatedVideo>) {
+        for (i in 0 until items.length()) {
+            val r = items.optJSONObject(i)?.optJSONObject("compactVideoRenderer") ?: continue
+            val id = r.optString("videoId")
+            if (id.isBlank()) continue
+            val title = runsText(r.optJSONObject("title"))
+            val artist = runsText(r.optJSONObject("longBylineText"))
+                .ifBlank { runsText(r.optJSONObject("shortBylineText")) }
+            val thumbs = r.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
+            val thumb = thumbs?.optJSONObject((thumbs.length() - 1).coerceAtLeast(0))
+                ?.optString("url")
+            out += RelatedVideo(id, title, artist, thumb?.takeIf { it.isNotBlank() })
+        }
+    }
+
+    private fun runsText(obj: JSONObject?): String {
+        val runs = obj?.optJSONArray("runs") ?: return obj?.optString("simpleText").orEmpty()
+        val sb = StringBuilder()
+        for (i in 0 until runs.length()) sb.append(runs.optJSONObject(i)?.optString("text").orEmpty())
+        return sb.toString()
+    }
+
+    // Lightweight text search (no yt-dlp) used to top up the Mix. Returns videos
+    // only — playlists/channels in the result page are skipped.
+    suspend fun searchVideos(query: String, limit: Int = 20): List<RelatedVideo> =
+        withContext(Dispatchers.IO) {
+            val out = LinkedHashMap<String, RelatedVideo>()
+            try {
+                val url = URL("https://www.youtube.com/youtubei/v1/search?key=$API_KEY")
+                val conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+                conn.connectTimeout = 5000
+                conn.readTimeout = 8000
+                conn.doOutput = true
+                val body = """{"context":{"client":{$WEB_CONTEXT}},"query":"${query.replace("\"", "'")}"}"""
+                conn.outputStream.write(body.toByteArray())
+                if (conn.responseCode != 200) return@withContext emptyList()
+                val json = JSONObject(conn.inputStream.bufferedReader().readText())
+                val sections = json.optJSONObject("contents")
+                    ?.optJSONObject("twoColumnSearchResultsRenderer")
+                    ?.optJSONObject("primaryContents")
+                    ?.optJSONObject("sectionListRenderer")
+                    ?.optJSONArray("contents") ?: return@withContext emptyList()
+                for (s in 0 until sections.length()) {
+                    val items = sections.optJSONObject(s)
+                        ?.optJSONObject("itemSectionRenderer")
+                        ?.optJSONArray("contents") ?: continue
+                    for (i in 0 until items.length()) {
+                        val item = items.optJSONObject(i) ?: continue
+                        item.optJSONObject("videoRenderer")?.let { r ->
+                            val id = r.optString("videoId")
+                            if (id.isNotBlank() && out.size < limit) {
+                                val title = runsText(r.optJSONObject("title"))
+                                val artist = runsText(r.optJSONObject("ownerText"))
+                                    .ifBlank { runsText(r.optJSONObject("longBylineText")) }
+                                val thumbs = r.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
+                                val thumb = thumbs?.optJSONObject((thumbs.length() - 1).coerceAtLeast(0))
+                                    ?.optString("url")
+                                out.putIfAbsent(id, RelatedVideo(id, title, artist, thumb))
+                            }
+                        }
+                        item.optJSONObject("lockupViewModel")?.let { r ->
+                            val id = r.optString("contentId")
+                            if (id.isBlank() || r.optString("contentType") != "LOCKUP_CONTENT_TYPE_VIDEO") return@let
+                            val meta = r.optJSONObject("metadata")
+                                ?.optJSONObject("lockupMetadataViewModel")
+                            val title = meta?.optJSONObject("title")?.optString("content").orEmpty()
+                            val artist = meta?.optJSONObject("metadata")
+                                ?.optJSONObject("contentMetadataViewModel")
+                                ?.optJSONArray("metadataRows")
+                                ?.optJSONObject(0)?.optJSONArray("metadataParts")
+                                ?.optJSONObject(0)?.optJSONObject("text")
+                                ?.optString("content").orEmpty()
+                            val thumb = r.optJSONObject("contentImage")
+                                ?.optJSONObject("thumbnailViewModel")
+                                ?.optJSONObject("image")
+                                ?.optJSONArray("sources")
+                                ?.optJSONObject(0)?.optString("url")
+                            if (out.size < limit) {
+                                out.putIfAbsent(id, RelatedVideo(id, title, artist, thumb))
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("InnerTube", "search failed", e)
+            }
+            out.values.toList()
+        }
 }

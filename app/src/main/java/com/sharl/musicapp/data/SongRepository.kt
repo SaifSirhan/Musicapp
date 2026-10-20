@@ -51,6 +51,7 @@ class SongRepository(context: Context) {
     fun recentSongs(limit: Int = 20) = dao.recentSongs(limit)
     fun mostPlayed(limit: Int = 20) = dao.mostPlayed(limit)
     fun songsByArtist(artist: String, limit: Int = 20) = dao.songsByArtist(artist, limit)
+    fun allSongs() = dao.allSongs()
     fun favoriteSongs(limit: Int = 20) = dao.favoriteSongs(limit)
     fun topArtist() = dao.topArtist()
     suspend fun searchLocal(q: String) = dao.searchLocal(q)

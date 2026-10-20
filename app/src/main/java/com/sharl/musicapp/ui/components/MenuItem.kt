@@ -12,14 +12,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
 @Composable
-fun MenuItem(label: String, subtitle: String? = null, onClick: () -> Unit) {
+fun MenuItem(label: String, subtitle: String? = null, icon: String? = null, onClick: () -> Unit) {
     TextButton(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(start = 4.dp)) {
             Text(
-                label,
+                if (icon != null) "$icon  $label" else label,
                 modifier = Modifier.fillMaxWidth(),
                 textAlign = TextAlign.Start
             )

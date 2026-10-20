@@ -47,15 +47,25 @@ class NewDropsRepository(context: Context) {
         }
     }
 
-    suspend fun refresh(context: Context, seedArtists: List<String>) {
-        if (seedArtists.isEmpty()) return
+    suspend fun refresh(
+        context: Context,
+        seedArtists: List<String>,
+        followedArtists: List<String> = emptyList()
+    ) {
+        if (seedArtists.isEmpty() && followedArtists.isEmpty()) return
+        // Followed artists go first so they own the early slots (and survive the
+        // take(100) cap) even when a lot of played artists are seeded too.
+        val ordered = (followedArtists + seedArtists)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinctBy { it.lowercase() }
         mutex.withLock {
             _loading.value = true
             try {
                 withContext(Dispatchers.IO) {
                     ensureInitialized(context.applicationContext)
                     val acc = LinkedHashMap<String, NewDrop>()
-                    for (artist in seedArtists.take(20)) {
+                    for (artist in ordered.take(20)) {
                         try {
                             val request = YoutubeDLRequest("ytsearchdate5:$artist").apply {
                                 addOption("--flat-playlist")

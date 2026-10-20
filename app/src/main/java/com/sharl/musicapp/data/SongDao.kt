@@ -41,6 +41,9 @@ interface SongDao {
     @Query("SELECT * FROM songs WHERE isHidden = 0 AND artist = :artist ORDER BY lastPlayedAt DESC LIMIT :limit")
     fun songsByArtist(artist: String, limit: Int): Flow<List<Song>>
 
+    @Query("SELECT * FROM songs WHERE isHidden = 0 ORDER BY title COLLATE NOCASE")
+    fun allSongs(): Flow<List<Song>>
+
     @Query("SELECT * FROM songs WHERE isHidden = 0 AND isFavorite = 1 ORDER BY lastPlayedAt DESC LIMIT :limit")
     fun favoriteSongs(limit: Int): Flow<List<Song>>
 
@@ -55,4 +58,17 @@ interface SongDao {
         LIMIT 10
     """)
     suspend fun searchLocal(q: String): List<Song>
+
+    @Query("""
+        SELECT artist FROM songs
+        WHERE isHidden = 0 AND playCount > 0 AND artist != ''
+          AND (:exclude = '' OR LOWER(artist) != LOWER(:exclude))
+        GROUP BY artist
+        ORDER BY SUM(playCount) DESC
+        LIMIT :limit
+    """)
+    suspend fun topArtists(limit: Int, exclude: String): List<String>
+
+    @Query("SELECT * FROM songs WHERE isHidden = 0 AND artist = :artist ORDER BY RANDOM() LIMIT :limit")
+    suspend fun randomSongsByArtist(artist: String, limit: Int): List<Song>
 }

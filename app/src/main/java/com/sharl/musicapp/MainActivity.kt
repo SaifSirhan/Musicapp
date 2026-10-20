@@ -70,9 +70,11 @@ import com.sharl.musicapp.data.AppDatabase
 import com.sharl.musicapp.data.AuthRepository
 import com.sharl.musicapp.data.Download
 import com.sharl.musicapp.data.DownloadRepository
+import com.sharl.musicapp.data.FollowRepository
 import com.sharl.musicapp.data.FriendsRepository
 import com.sharl.musicapp.data.ImportRepository
 import com.sharl.musicapp.data.InnerTubeHelper
+import com.sharl.musicapp.data.MixRepository
 import com.sharl.musicapp.data.ResolutionStats
 import com.sharl.musicapp.data.NewDropsRepository
 import com.sharl.musicapp.data.NowPlaying
@@ -105,6 +107,7 @@ import com.sharl.musicapp.ui.screens.PrivacyPolicyScreen
 import com.sharl.musicapp.ui.screens.SearchTab
 import com.sharl.musicapp.ui.screens.SettingsScreen
 import com.sharl.musicapp.ui.screens.SignInScreen
+import com.sharl.musicapp.ui.screens.SongPickerScreen
 import com.sharl.musicapp.ui.theme.AccentOptions
 import com.sharl.musicapp.ui.theme.DefaultAccent
 import com.sharl.musicapp.ui.theme.MusicAppTheme
@@ -165,6 +168,7 @@ fun PlayerScreen(
     val forYouRecent by repo.recentSongs(10).collectAsState(initial = emptyList())
     val forYouTop by repo.mostPlayed(10).collectAsState(initial = emptyList())
     val forYouFavorites by repo.favoriteSongs(10).collectAsState(initial = emptyList())
+    val allSongs by repo.allSongs().collectAsState(initial = emptyList())
     val topArtistName by repo.topArtist().collectAsState(initial = null)
     val forYouByArtist by (topArtistName?.let {
         repo.songsByArtist(it, 10)
@@ -237,8 +241,14 @@ fun PlayerScreen(
     val speedDialRepo = remember { SpeedDialRepository(context) }
     val speedDialSlots by speedDialRepo.allSlots().collectAsState(initial = emptyList())
     var speedDialMenuPosition by remember { mutableStateOf<Int?>(null) }
-    var speedDialAssignPosition by remember { mutableStateOf<Int?>(null) }  // for song picker
-    var speedDialPickerSource by remember { mutableStateOf<String?>(null) }  // "favorites" | "recent"
+    var showSongPickerForSlot by remember { mutableStateOf<Int?>(null) }
+
+    val mixRepo = remember { MixRepository(context) }
+    var mixBuilding by remember { mutableStateOf(false) }
+    // Seed title of the radio queue currently loaded, null for normal playback.
+    var activeMixTitle by remember { mutableStateOf<String?>(null) }
+    val followRepo = remember { FollowRepository(context) }
+    var followedArtists by remember { mutableStateOf(followRepo.artists()) }
 
     val downloadRepo = remember { DownloadRepository(context) }
     val downloads by downloadRepo.all().collectAsState(initial = emptyList())
@@ -285,12 +295,12 @@ fun PlayerScreen(
     val newDropsLoading by newDropsRepo.loading.collectAsState()
     var showNewDropsAll by remember { mutableStateOf(false) }
 
-    // seed artists: top-played (SongDao) ∪ favorites' artists
+    // seed artists: followed ∪ top-played (SongDao) ∪ favorites' artists
     val newDropsSeedArtists by remember {
         androidx.compose.runtime.derivedStateOf {
             val top = forYouTop.sortedByDescending { it.playCount }.take(10).map { it.artist }
             val favs = favorites.map { it.artist }
-            (top + favs).map { it.trim() }.filter { it.isNotEmpty() }
+            (followedArtists + top + favs).map { it.trim() }.filter { it.isNotEmpty() }
                 .distinctBy { it.lowercase() }.take(20)
         }
     }
@@ -299,7 +309,7 @@ fun PlayerScreen(
     // flows have emitted the played/favorite artists.
     androidx.compose.runtime.LaunchedEffect(newDropsSeedArtists, newDropsLoading) {
         if (newDropsSeedArtists.isNotEmpty() && newDropsRepo.isStale() && !newDropsLoading) {
-            newDropsRepo.refresh(context, newDropsSeedArtists)
+            newDropsRepo.refresh(context, newDropsSeedArtists, followedArtists)
         }
     }
 
@@ -728,12 +738,21 @@ fun PlayerScreen(
         }
     }
 
-    fun playFromQueue(items: List<QueueItem>, index: Int, downloadAhead: Boolean = false) {
+    fun playFromQueue(
+        items: List<QueueItem>,
+        index: Int,
+        downloadAhead: Boolean = false,
+        prefetchAhead: Int = PRELOAD_AHEAD,
+        mixTitle: String? = null
+    ) {
         if (controller == null) {
             status = "Connecting..."
             return
         }
         if (index !in items.indices) return
+        // Any regular play request leaves the radio station; a mix request sets
+        // its seed so the Queue tab can show "Mix: …".
+        activeMixTitle = mixTitle
         // Supersede any in-flight rebuild: rapid Next taps must not leave two
         // setMediaItems calls racing against different queue indices.
         playJob?.cancel()
@@ -772,8 +791,9 @@ fun PlayerScreen(
 
                 // Warm the cache for the upcoming tracks, then extend the loaded
                 // window with whatever became available so the next transitions
-                // are gapless too. Serialized via extractMutex.
-                val upcoming = (index + 1..index + PRELOAD_AHEAD)
+                // are gapless too. Serialized via extractMutex. Mixes ask for a
+                // wider warm-up (first five tracks) so skips start instantly.
+                val upcoming = (index + 1..index + prefetchAhead)
                     .filter { it < items.size }
                 for (idx in upcoming) {
                     ensureActive()
@@ -912,8 +932,51 @@ fun PlayerScreen(
         }
     }
 
-    fun onSpeedDialTap(slot: SpeedDialSlot?, position: Int) {
-        if (slot == null || slot.type == "empty") {
+    // Phase 19: build the radio queue off the UI thread, then hand it to the
+    // player. Only the first five tracks get warmed; the rest resolve lazily.
+    fun startMix(seed: Song) {
+        if (mixBuilding) return
+        menuSong = null
+        scope.launch {
+            mixBuilding = true
+            status = "Building your mix..."
+            try {
+                val mix = mixRepo.generateMix(seed)
+                if (mix.size <= 1) {
+                    status = "Mix unavailable"
+                    snackbarHostState.showSnackbar("Couldn't build a mix — check your connection.")
+                    return@launch
+                }
+                playFromQueue(
+                    mix.map { QueueItem(it.videoId, it.title) },
+                    0,
+                    prefetchAhead = 4,
+                    mixTitle = seed.title
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                status = "Mix failed: ${e.message}"
+                snackbarHostState.showSnackbar("Couldn't build a mix — check your connection.")
+            } finally {
+                mixBuilding = false
+            }
+        }
+    }
+
+    fun toggleFollow(artist: String) {
+        followRepo.toggle(artist)
+        followedArtists = followRepo.artists()
+        val seeds = (followedArtists + newDropsSeedArtists)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinctBy { it.lowercase() }
+        if (seeds.isNotEmpty()) {
+            scope.launch { newDropsRepo.refresh(context, seeds, followedArtists) }
+        }
+    }
+
+    fun onSpeedDialTap(slot: SpeedDialSlot?, position: Int) {        if (slot == null || slot.type == "empty") {
             speedDialMenuPosition = position
             return
         }
@@ -1003,8 +1066,9 @@ fun PlayerScreen(
         }
     }
 
+    Box(modifier = modifier.fillMaxSize()) {
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
@@ -1072,7 +1136,22 @@ fun PlayerScreen(
                 onNowPlayingTabChange = { nowPlayingTab = it },
                 queue = queue,
                 queueIndex = queueIndex,
+                queueTabLabel = activeMixTitle?.let { "Mix: $it" } ?: "Queue",
                 onQueueItemClick = { idx -> playFromQueue(queue, idx) },
+                onStartMix = {
+                    queue.getOrNull(queueIndex)?.let { q ->
+                        startMix(
+                            Song(
+                                videoId = q.videoId,
+                                title = q.title,
+                                artist = nowPlayingArtist ?: "",
+                                thumbnailUrl = nowPlayingThumbnail,
+                                lastPlayedAt = 0L,
+                                playCount = 0
+                            )
+                        )
+                    }
+                },
                 onBack = { showNowPlaying = false },
                 onPlayPause = {
                     val c = controller ?: return@NowPlayingScreen
@@ -1107,6 +1186,29 @@ fun PlayerScreen(
                 showPrivacyPolicy = false
             }
             PrivacyPolicyScreen(onBack = { showPrivacyPolicy = false })
+        } else if (showSongPickerForSlot != null) {
+            androidx.activity.compose.BackHandler(enabled = true) {
+                showSongPickerForSlot = null
+            }
+            val slot = showSongPickerForSlot!!
+            SongPickerScreen(
+                recent = forYouRecent,
+                favorites = favorites,
+                allSongs = allSongs,
+                onBack = { showSongPickerForSlot = null },
+                onPick = { song ->
+                    scope.launch {
+                        speedDialRepo.assignSong(
+                            slot,
+                            song.videoId,
+                            song.title,
+                            song.thumbnailUrl ?: youtubeThumb(song.videoId)
+                        )
+                    }
+                    showSongPickerForSlot = null
+                },
+                onToggleFavorite = { song -> scope.launch { repo.toggleFavorite(song) } }
+            )
         } else if (showSettings) {
             androidx.activity.compose.BackHandler(enabled = true) {
                 showSettings = false
@@ -1185,7 +1287,7 @@ fun PlayerScreen(
                 onRefresh = {
                     scope.launch {
                         if (newDropsSeedArtists.isNotEmpty()) {
-                            newDropsRepo.refresh(context, newDropsSeedArtists)
+                            newDropsRepo.refresh(context, newDropsSeedArtists, followedArtists)
                         }
                     }
                 },
@@ -1312,6 +1414,10 @@ fun PlayerScreen(
                     topArtistName = topArtistName,
                     forYouByArtist = forYouByArtist,
                     forYouFavorites = forYouFavorites,
+                    isFollowingTopArtist = topArtistName?.let { a ->
+                        followedArtists.any { it.equals(a, ignoreCase = true) }
+                    } ?: false,
+                    onToggleFollowTopArtist = { topArtistName?.let { toggleFollow(it) } },
                 )
             }
             3 -> {
@@ -1610,6 +1716,9 @@ fun PlayerScreen(
                     )
                     HorizontalDivider()
 
+                    MenuItem("Start Mix", icon = "📻") {
+                        startMix(song)
+                    }
                     MenuItem("Play next") {
                         insertIntoQueueNext(song)
                         menuSong = null
@@ -1908,14 +2017,8 @@ fun PlayerScreen(
                         scope.launch { speedDialRepo.assignShuffleRecent(sdPos) }
                         speedDialMenuPosition = null
                     }
-                    MenuItem("Choose from Favorites") {
-                        speedDialPickerSource = "favorites"
-                        speedDialAssignPosition = sdPos
-                        speedDialMenuPosition = null
-                    }
-                    MenuItem("Choose from Recently Played") {
-                        speedDialPickerSource = "recent"
-                        speedDialAssignPosition = sdPos
+                    MenuItem("Choose a song") {
+                        showSongPickerForSlot = sdPos
                         speedDialMenuPosition = null
                     }
                     if (existing != null && existing.type != "empty") {
@@ -1926,55 +2029,6 @@ fun PlayerScreen(
                     }
                 }
             }
-        }
-
-        val assignPos = speedDialAssignPosition
-        if (assignPos != null) {
-            androidx.compose.material3.AlertDialog(
-                onDismissRequest = {
-                    speedDialAssignPosition = null
-                    speedDialPickerSource = null
-                },
-                title = { Text("Pick a song") },
-                text = {
-                    val choices = when (speedDialPickerSource) {
-                        "favorites" -> favorites.take(20)
-                        "recent" -> forYouRecent.take(20)
-                        else -> (forYouTop + forYouRecent).distinctBy { it.videoId }.take(20)
-                    }
-                    androidx.compose.foundation.lazy.LazyColumn(
-                        modifier = Modifier.heightIn(max = 400.dp)
-                    ) {
-                        items(choices, key = { it.videoId }) { song ->
-                            androidx.compose.material3.TextButton(
-                                onClick = {
-                                    scope.launch {
-                                        speedDialRepo.assignSong(
-                                            assignPos,
-                                            song.videoId,
-                                            song.title,
-                                            song.thumbnailUrl ?: youtubeThumb(song.videoId)
-                                        )
-                                    }
-                                    speedDialAssignPosition = null
-                                    speedDialPickerSource = null
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(song.title, maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.fillMaxWidth())
-                            }
-                        }
-                    }
-                },
-                confirmButton = {
-                    androidx.compose.material3.TextButton(onClick = {
-                        speedDialAssignPosition = null
-                        speedDialPickerSource = null
-                    }) { Text("Cancel") }
-                }
-            )
         }
 
         val plMenu = playlistListMenu
@@ -2126,6 +2180,22 @@ fun PlayerScreen(
                 text = { Text("Removing $done of $total…") },
                 confirmButton = {}
             )
+        }
+    }
+
+        if (mixBuilding) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.6f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    androidx.compose.material3.CircularProgressIndicator()
+                    Spacer(Modifier.height(12.dp))
+                    Text("Building your mix…")
+                }
+            }
         }
     }
 }

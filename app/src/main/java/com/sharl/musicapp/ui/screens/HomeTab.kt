@@ -61,6 +61,8 @@ fun ColumnScope.HomeTab(
     topArtistName: String?,
     forYouByArtist: List<Song>,
     forYouFavorites: List<Song>,
+    isFollowingTopArtist: Boolean = false,
+    onToggleFollowTopArtist: () -> Unit = {},
 ) {
     val quickPicks30 = androidx.compose.runtime.remember(forYouTop, forYouRecent) {
         val combined = (forYouTop + forYouRecent).distinctBy { it.videoId }
@@ -294,7 +296,9 @@ fun ColumnScope.HomeTab(
                                 forYouByArtist.map { QueueItem(it.videoId, it.title) },
                                 forYouByArtist.indexOf(song)
                             )
-                        }
+                        },
+                        actionLabel = if (isFollowingTopArtist) "Following" else "Follow",
+                        onAction = onToggleFollowTopArtist
                     )
                 }
             }

@@ -1,9 +1,11 @@
 package com.sharl.musicapp.ui.screens
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
@@ -31,8 +34,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.session.MediaController
@@ -69,7 +79,9 @@ fun NowPlayingScreen(
     onNowPlayingTabChange: (Int) -> Unit,
     queue: List<QueueItem>,
     queueIndex: Int,
+    queueTabLabel: String = "Queue",
     onQueueItemClick: (Int) -> Unit,
+    onStartMix: () -> Unit,
     onBack: () -> Unit,
     onPlayPause: () -> Unit,
     onPrev: () -> Unit,
@@ -115,7 +127,13 @@ fun NowPlayingScreen(
             Tab(
                 selected = nowPlayingTab == 2,
                 onClick = { onNowPlayingTabChange(2) },
-                text = { Text("Queue") }
+                text = {
+                    Text(
+                        queueTabLabel,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             )
         }
 
@@ -139,11 +157,12 @@ fun NowPlayingScreen(
 
         when (nowPlayingTab) {
             0 -> {
-                Spacer(modifier = Modifier.weight(0.6f))
-
-                // Artwork (or video), centered
-                Box(
-                    modifier = Modifier.fillMaxWidth(),
+                // Artwork (or video), centered in whatever vertical space is
+                // left so the transport row below can never be pushed off-screen.
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
                     if (isVideoMode) {
@@ -162,7 +181,8 @@ fun NowPlayingScreen(
                                 .aspectRatio(16f / 9f)
                         )
                     } else {
-                        Thumbnail(thumbnailUrl, 280.dp)
+                        val artSize = minOf(maxWidth, maxHeight)
+                        Thumbnail(thumbnailUrl, artSize)
                     }
                 }
                 Spacer(modifier = Modifier.size(16.dp))
@@ -195,7 +215,7 @@ fun NowPlayingScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.weight(0.4f))
+                Spacer(modifier = Modifier.size(8.dp))
 
                 // Video/audio toggle
                 Row(
@@ -369,16 +389,29 @@ fun NowPlayingScreen(
             )
         }
 
-        // Shuffle + repeat row
+        // Shuffle, transport and repeat in one row: the artwork above is
+        // flexible, so these controls always stay on screen.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 64.dp),
+                .padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
-                modifier = Modifier.size(56.dp),
+                modifier = Modifier.size(48.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                IconButton(onClick = onStartMix) {
+                    Text(
+                        "📻",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier.size(48.dp),
                 contentAlignment = Alignment.Center
             ) {
                 IconButton(onClick = onShuffleToggle) {
@@ -393,7 +426,53 @@ fun NowPlayingScreen(
                 }
             }
             Box(
-                modifier = Modifier.size(56.dp),
+                modifier = Modifier.size(48.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                IconButton(onClick = onPrev) {
+                    TransportIcon(
+                        kind = TransportKind.Previous,
+                        size = 32.dp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary)
+                    .clickable(enabled = !isLoading) { onPlayPause() },
+                contentAlignment = Alignment.Center
+            ) {
+                if (isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(32.dp),
+                        strokeWidth = 3.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                } else {
+                    TransportIcon(
+                        kind = if (isPlaying) TransportKind.Pause else TransportKind.Play,
+                        size = 32.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier.size(48.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                IconButton(onClick = onNext) {
+                    TransportIcon(
+                        kind = TransportKind.Next,
+                        size = 32.dp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier.size(48.dp),
                 contentAlignment = Alignment.Center
             ) {
                 IconButton(onClick = onRepeatToggle) {
@@ -415,57 +494,61 @@ fun NowPlayingScreen(
         }
 
         Spacer(modifier = Modifier.size(16.dp))
+    }
+}
 
-        // Big transport row
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier.size(72.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                IconButton(onClick = onPrev) {
-                    Text(
-                        "⏮",
-                        style = MaterialTheme.typography.displaySmall
-                    )
-                }
+private enum class TransportKind { Previous, Play, Pause, Next }
+
+/** Vector transport glyphs, drawn locally so the screen needs no icon artifact. */
+@Composable
+private fun TransportIcon(kind: TransportKind, size: Dp, color: Color) {
+    Canvas(modifier = Modifier.size(size)) {
+        val w = this.size.width
+        val h = this.size.height
+        when (kind) {
+            TransportKind.Play -> {
+                drawPath(
+                    Path().apply {
+                        moveTo(w * 0.30f, h * 0.16f)
+                        lineTo(w * 0.30f, h * 0.84f)
+                        lineTo(w * 0.84f, h * 0.50f)
+                        close()
+                    },
+                    color
+                )
             }
-            Box(
-                modifier = Modifier.size(72.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                IconButton(onClick = onPlayPause) {
-                    if (isLoading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(32.dp),
-                            strokeWidth = 3.dp,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    } else {
-                        Text(
-                            if (isPlaying) "⏸" else "▶",
-                            style = MaterialTheme.typography.displayMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
+            TransportKind.Pause -> {
+                val barW = w * 0.20f
+                val barH = h * 0.68f
+                val top = (h - barH) / 2f
+                drawRoundRect(color, Offset(w * 0.22f, top), Size(barW, barH), CornerRadius(barW / 4f))
+                drawRoundRect(color, Offset(w * 0.58f, top), Size(barW, barH), CornerRadius(barW / 4f))
             }
-            Box(
-                modifier = Modifier.size(72.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                IconButton(onClick = onNext) {
-                    Text(
-                        "⏭",
-                        style = MaterialTheme.typography.displaySmall
-                    )
+            TransportKind.Previous, TransportKind.Next -> {
+                val triH = h * 0.72f
+                val triW = w * 0.60f
+                val top = (h - triH) / 2f
+                val path = Path()
+                if (kind == TransportKind.Next) {
+                    path.moveTo(w * 0.16f, top)
+                    path.lineTo(w * 0.16f, top + triH)
+                    path.lineTo(w * 0.16f + triW, h / 2f)
+                } else {
+                    path.moveTo(w * 0.84f, top)
+                    path.lineTo(w * 0.84f, top + triH)
+                    path.lineTo(w * 0.84f - triW, h / 2f)
                 }
+                path.close()
+                drawPath(path, color)
+                val barW = w * 0.12f
+                val barX = if (kind == TransportKind.Next) w - barW else 0f
+                drawRoundRect(
+                    color = color,
+                    topLeft = Offset(barX, top),
+                    size = Size(barW, triH),
+                    cornerRadius = CornerRadius(barW / 4f)
+                )
             }
         }
-
-        Spacer(modifier = Modifier.weight(0.4f))
     }
 }
