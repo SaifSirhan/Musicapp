@@ -66,6 +66,7 @@ fun SettingsScreen(
     onSignIn: () -> Unit = {},
     onSignOut: () -> Unit = {},
     onCopyInvite: () -> Unit = {},
+    onImportAccount: () -> Unit = {},
     friends: List<Profile> = emptyList(),
     addFriendCode: String = "",
     onAddFriendCodeChange: (String) -> Unit = {},
@@ -229,6 +230,8 @@ fun SettingsScreen(
                 }
             }
         }
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(onClick = onImportAccount) { Text("Import from Spotify") }
         HorizontalDivider()
 
         // Playback — intentionally empty in 15d; gapless toggle lands here in 15e.

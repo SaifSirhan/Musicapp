@@ -66,6 +66,8 @@ android {
         // tier caps uploads at 50 MB). Read via secret() so it can be set in
         // secrets.properties or as a -P/gradle.properties property.
         buildConfigField("String", "OTA_MANIFEST_URL", "\"${secret("OTA_MANIFEST_URL")}\"")
+        buildConfigField("String", "SPOTIFY_CLIENT_ID", "\"${secret("SPOTIFY_CLIENT_ID")}\"")
+        buildConfigField("String", "SPOTIFY_CLIENT_SECRET", "\"${secret("SPOTIFY_CLIENT_SECRET")}\"")
     }
 
     buildTypes {

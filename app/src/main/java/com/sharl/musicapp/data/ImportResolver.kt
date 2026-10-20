@@ -58,6 +58,17 @@ class ImportResolver(private val context: Context) {
         }
     }
 
+    // Account imports (Spotify) feed an explicit, caller-sized list of tracks
+    // that still need a ytsearch1 match. Kept separate from resolve() so the
+    // existing 200-track paste/file caps stay untouched.
+    suspend fun resolveQueries(
+        name: String,
+        tracks: List<ImportTrack>,
+        onProgress: (Int, Int) -> Unit = { _, _ -> }
+    ): ImportPreview = withContext(Dispatchers.IO) {
+        resolveUnresolved(name, tracks, onProgress)
+    }
+
     // ---- B1: YouTube Music / YouTube playlist URL -----------------------------
 
     private suspend fun resolveYtm(url: String): ImportPreview {
