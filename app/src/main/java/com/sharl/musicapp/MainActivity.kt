@@ -74,6 +74,8 @@ import com.sharl.musicapp.data.FollowRepository
 import com.sharl.musicapp.data.FriendsRepository
 import com.sharl.musicapp.data.ImportRepository
 import com.sharl.musicapp.data.InnerTubeHelper
+import com.sharl.musicapp.data.LocalMedia
+import com.sharl.musicapp.data.LocalMediaRepository
 import com.sharl.musicapp.data.MixRepository
 import com.sharl.musicapp.data.ResolutionStats
 import com.sharl.musicapp.data.NewDropsRepository
@@ -90,6 +92,7 @@ import com.sharl.musicapp.data.Song
 import com.sharl.musicapp.data.SongRepository
 import com.sharl.musicapp.data.SpeedDialRepository
 import com.sharl.musicapp.data.SpeedDialSlot
+import com.sharl.musicapp.data.SpotifyImporter
 import com.sharl.musicapp.data.UpdateRepository
 import com.sharl.musicapp.data.UpdateState
 import java.io.File
@@ -98,6 +101,7 @@ import com.sharl.musicapp.ui.components.Thumbnail
 import com.sharl.musicapp.ui.components.asSong
 import com.sharl.musicapp.ui.screens.ForYouScreen
 import com.sharl.musicapp.ui.screens.HomeTab
+import com.sharl.musicapp.ui.screens.ImportAccountScreen
 import com.sharl.musicapp.ui.screens.ImportScreen
 import com.sharl.musicapp.ui.screens.LibraryTab
 import com.sharl.musicapp.ui.screens.NewDropsScreen
@@ -108,6 +112,7 @@ import com.sharl.musicapp.ui.screens.SearchTab
 import com.sharl.musicapp.ui.screens.SettingsScreen
 import com.sharl.musicapp.ui.screens.SignInScreen
 import com.sharl.musicapp.ui.screens.SongPickerScreen
+import com.sharl.musicapp.ui.screens.VideoPlayerScreen
 import com.sharl.musicapp.ui.theme.AccentOptions
 import com.sharl.musicapp.ui.theme.DefaultAccent
 import com.sharl.musicapp.ui.theme.MusicAppTheme
@@ -115,12 +120,27 @@ import com.sharl.musicapp.ui.util.formatRelative
 import com.sharl.musicapp.ui.util.youtubeThumb
 import kotlinx.coroutines.launch
 
-data class QueueItem(val videoId: String, val title: String)
+data class QueueItem(
+    val videoId: String,
+    val title: String,
+    val artist: String = "",
+    val localUri: String? = null,
+    val isVideo: Boolean = false
+)
+
+private fun isLocalUri(uri: String): Boolean =
+    uri.startsWith("content://") || uri.startsWith("file://")
 
 class MainActivity : ComponentActivity() {
+    // Set when the Spotify redirect arrives before the UI exists (cold start),
+    // so PlayerScreen can open the import screen once it composes.
+    private var pendingImportRedirect = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        SpotifyImporter.init(applicationContext)
+        handleSpotifyRedirect(intent)
         setContent {
             val context = LocalContext.current
             val prefs = remember {
@@ -129,6 +149,8 @@ class MainActivity : ComponentActivity() {
             var accentIndex by remember {
                 mutableStateOf(prefs.getInt("accent_index", 0))
             }
+            val openImport = pendingImportRedirect
+            pendingImportRedirect = false
             val accent = AccentOptions.getOrNull(accentIndex)?.color ?: DefaultAccent
             val snackbarHostState = remember { SnackbarHostState() }
 
@@ -144,10 +166,25 @@ class MainActivity : ComponentActivity() {
                             accentIndex = idx
                             prefs.edit().putInt("accent_index", idx).apply()
                         },
-                        snackbarHostState = snackbarHostState
+                        snackbarHostState = snackbarHostState,
+                        openImportOnStart = openImport
                     )
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleSpotifyRedirect(intent)
+    }
+
+    private fun handleSpotifyRedirect(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (data.scheme == "com.sharl.musicapp" && data.host == "callback") {
+            pendingImportRedirect = true
+            SpotifyImporter.handleRedirect(applicationContext, data)
         }
     }
 }
@@ -158,7 +195,8 @@ fun PlayerScreen(
     modifier: Modifier = Modifier,
     accentIndex: Int,
     onAccentChange: (Int) -> Unit,
-    snackbarHostState: SnackbarHostState = SnackbarHostState()
+    snackbarHostState: SnackbarHostState = SnackbarHostState(),
+    openImportOnStart: Boolean = false
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -253,10 +291,14 @@ fun PlayerScreen(
     val downloadRepo = remember { DownloadRepository(context) }
     val downloads by downloadRepo.all().collectAsState(initial = emptyList())
     val downloadIds by downloadRepo.allIds().collectAsState(initial = emptyList())
+    val localMediaRepo = remember { LocalMediaRepository(context) }
+    val localMedia by localMediaRepo.all().collectAsState(initial = emptyList())
+    var mediaPermissionGranted by remember { mutableStateOf(false) }
     val downloadStates by Downloader.states.collectAsState()
     val settings = remember { SettingsRepo(context) }
     var storageExternalState by remember { mutableStateOf(settings.storageExternal) }
     var showSettings by remember { mutableStateOf(false) }
+    var showImportAccount by remember { mutableStateOf(openImportOnStart) }
     var playlistListMenu by remember { mutableStateOf<Playlist?>(null) }
     var playlistListSongCount by remember { mutableStateOf(0) }
     var playlistListDownloaded by remember { mutableStateOf(0) }
@@ -489,6 +531,47 @@ fun PlayerScreen(
         }
     }
 
+    // Local media (Phase 20). API 33+ splits audio/video; older releases use
+    // the legacy storage permission. Requests are staggered after the
+    // notification dialog: two simultaneous permission prompts can clobber
+    // each other on some OEM builds.
+    fun mediaPermissions(): Array<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(
+                Manifest.permission.READ_MEDIA_AUDIO,
+                Manifest.permission.READ_MEDIA_VIDEO
+            )
+        } else {
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+
+    fun hasMediaPermissions(): Boolean = mediaPermissions().all {
+        ContextCompat.checkSelfPermission(context, it) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    val mediaPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        val granted = mediaPermissions().all { result[it] == true }
+        mediaPermissionGranted = granted
+        if (granted) scope.launch { localMediaRepo.refresh() }
+    }
+
+    LaunchedEffect(Unit) {
+        mediaPermissionGranted = hasMediaPermissions()
+        if (hasMediaPermissions()) {
+            localMediaRepo.refresh()
+        } else {
+            kotlinx.coroutines.delay(1200)
+            mediaPermissionLauncher.launch(mediaPermissions())
+        }
+    }
+
+    LaunchedEffect(libraryTab) {
+        if (libraryTab == 4 && hasMediaPermissions()) localMediaRepo.refresh()
+    }
+
     LaunchedEffect(showNowPlaying, nowPlayingTitle) {
         while (showNowPlaying && nowPlayingTitle != null) {
             controller?.let { c ->
@@ -534,6 +617,7 @@ fun PlayerScreen(
     // via the shared mutex so only one yt-dlp process runs at a time.
     suspend fun preExtract(videoId: String, title: String? = null) {
         if (videoId.isBlank()) return
+        if (isLocalUri(videoId)) return
         if (PlaybackCache.get(videoId) != null) return
         if (downloadRepo.get(videoId)?.let { java.io.File(it.filePath).exists() } == true) return
         extractMutex.withLock {
@@ -560,7 +644,21 @@ fun PlayerScreen(
         (forYouRecent.firstOrNull() ?: forYouTop.firstOrNull())?.let { preExtract(it.videoId, it.title) }
     }
 
-    suspend fun extractOrCache(videoId: String, fallbackTitle: String? = null): Pair<String, SongMetadata> {
+    suspend fun extractOrCache(
+        videoId: String,
+        fallbackTitle: String? = null,
+        localUri: String? = null,
+        localArtist: String = ""
+    ): Pair<String, SongMetadata> {
+        // Local Media Hub: the queue item already points at playable content.
+        if (localUri != null) {
+            return localUri to SongMetadata(
+                title = fallbackTitle ?: localUri,
+                artist = localArtist,
+                album = null,
+                thumbnailUrl = null
+            )
+        }
         // Offline short-circuit: a downloaded song resolves to its local file,
         // no network / no yt-dlp re-extraction.
         downloadRepo.get(videoId)?.let { row ->
@@ -612,7 +710,18 @@ fun PlayerScreen(
     // Non-blocking cache lookup: in-session map first, then the persistent
     // PlaybackCache. Returns null when a track isn't resolved yet, so callers
     // skip it instead of triggering a cold (blocking) yt-dlp extraction.
-    fun cachedOnly(videoId: String): Pair<String, SongMetadata>? {
+    fun cachedOnly(item: QueueItem): Pair<String, SongMetadata>? {
+        // Local files need no resolution and never expire, so the gapless
+        // window can always include them.
+        item.localUri?.let { uri ->
+            return uri to SongMetadata(
+                title = item.title,
+                artist = item.artist,
+                album = null,
+                thumbnailUrl = null
+            )
+        }
+        val videoId = item.videoId
         // Downloaded files win over stream URLs: they never expire and need no
         // network, so the gapless window can include them unconditionally.
         downloads.firstOrNull { it.videoId == videoId }?.let { row ->
@@ -675,7 +784,7 @@ fun PlayerScreen(
         var nextToLoad = windowStart + c.mediaItemCount
         while (nextToLoad <= currentIndex + PRELOAD_AHEAD && nextToLoad < queue.size) {
             val q = queue[nextToLoad]
-            val cached = cachedOnly(q.videoId) ?: break
+            val cached = cachedOnly(q) ?: break
             c.addMediaItem(buildMediaItem(q.videoId, nextToLoad, cached.first, cached.second))
             nextToLoad++
         }
@@ -687,10 +796,16 @@ fun PlayerScreen(
     fun presentTrack(index: Int, meta: SongMetadata?) {
         val q = queue.getOrNull(index) ?: return
         nowPlayingTitle = meta?.title ?: q.title
-        nowPlayingArtist = meta?.artist
+        nowPlayingArtist = meta?.artist ?: q.artist
         nowPlayingThumbnail = meta?.thumbnailUrl
-        isVideoMode = false
+        isVideoMode = q.isVideo
         status = "Playing: ${nowPlayingTitle}"
+        if (q.localUri != null) {
+            // Local files have no library row to record and no lyrics source.
+            lyrics = emptyList()
+            lyricsLoading = false
+            return
+        }
         scope.launch {
             repo.recordPlay(
                 q.videoId,
@@ -721,6 +836,7 @@ fun PlayerScreen(
         if (suggestions.isEmpty()) return
         scope.launch {
             for (s in suggestions) {
+                if (s.localUri != null) continue
                 if (downloadRepo.get(s.videoId)?.let { java.io.File(it.filePath).exists() } == true) continue
                 val song = runCatching { repo.get(s.videoId) }.getOrNull()
                 try {
@@ -763,7 +879,7 @@ fun PlayerScreen(
         if (downloadAhead) downloadSuggestions(items, index + 1)
         playJob = scope.launch {
             try {
-                val result = extractOrCache(item.videoId, item.title)
+                val result = extractOrCache(item.videoId, item.title, item.localUri, item.artist)
                 // A superseded request may finish extraction after cancellation;
                 // never apply its stale window.
                 ensureActive()
@@ -778,7 +894,7 @@ fun PlayerScreen(
                 val endIdx = minOf(index + PRELOAD_AHEAD, items.size - 1)
                 for (i in (index + 1)..endIdx) {
                     val next = items[i]
-                    val cached = cachedOnly(next.videoId) ?: break
+                    val cached = cachedOnly(next) ?: break
                     mediaItems.add(buildMediaItem(next.videoId, i, cached.first, cached.second))
                 }
                 windowStart = index
@@ -797,7 +913,7 @@ fun PlayerScreen(
                     .filter { it < items.size }
                 for (idx in upcoming) {
                     ensureActive()
-                    preExtract(items[idx].videoId, items[idx].title)
+                    if (items[idx].localUri == null) preExtract(items[idx].videoId, items[idx].title)
                     syncPlayerWindow(queueIndex)
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -857,7 +973,7 @@ fun PlayerScreen(
             if (newIndex !in queue.indices) return@collect
             queueIndex = newIndex
             val q = queue[newIndex]
-            presentTrack(newIndex, cachedOnly(q.videoId)?.second)
+            presentTrack(newIndex, cachedOnly(q)?.second)
             val upcoming = listOf(newIndex + 1, newIndex + 2, newIndex + 3)
                 .filter { it < queue.size }
             scope.launch {
@@ -930,6 +1046,23 @@ fun PlayerScreen(
             preExtract(item.videoId, item.title)
             relinkPlayerWindowTail()
         }
+    }
+
+    // Phase 20: local songs/videos are already playable content URIs; no
+    // resolution step, and a video opens straight into full-screen playback.
+    fun playLocal(items: List<LocalMedia>, index: Int) {
+        if (index !in items.indices) return
+        val queueItems = items.map {
+            QueueItem(
+                videoId = it.id,
+                title = it.title,
+                artist = it.artist,
+                localUri = it.id,
+                isVideo = it.isVideo
+            )
+        }
+        playFromQueue(queueItems, index)
+        if (items[index].isVideo) showNowPlaying = true
     }
 
     // Phase 19: build the radio queue off the UI thread, then hand it to the
@@ -1014,6 +1147,13 @@ fun PlayerScreen(
         val c = controller ?: return
         if (queueIndex < 0) return
         val item = queue[queueIndex]
+        // Local files carry both streams in the same URI — flipping the view
+        // is purely a UI concern and needs no re-extraction.
+        if (item.localUri != null) {
+            isVideoMode = !isVideoMode
+            status = if (isVideoMode) "Video mode" else "Audio mode"
+            return
+        }
         val wasPlaying = c.isPlaying
         val pos = c.currentPosition
         val newMode = !isVideoMode
@@ -1273,7 +1413,24 @@ fun PlayerScreen(
                 innerTubeFailCount = innerTubeFailCount,
                 onCheckForUpdates = { scope.launch { updateRepo.check() } },
                 onDownloadUpdate = { info -> scope.launch { updateRepo.download(info) } },
-                onInstallUpdate = { file -> installUpdate(context, file) }
+                onInstallUpdate = { file -> installUpdate(context, file) },
+                onImportAccount = {
+                    showSettings = false
+                    showImportAccount = true
+                }
+            )
+        } else if (showImportAccount) {
+            androidx.activity.compose.BackHandler(enabled = true) {
+                showImportAccount = false
+                showSettings = true
+            }
+            ImportAccountScreen(
+                signedIn = signedIn,
+                accountEmail = authRepo.currentUserEmail(),
+                onBack = {
+                    showImportAccount = false
+                    showSettings = true
+                }
             )
         } else if (showNewDropsAll) {
             androidx.activity.compose.BackHandler(enabled = true) {
@@ -1514,6 +1671,11 @@ fun PlayerScreen(
                     },
                     onFriendBack = { selectedFriend = null },
                     onSignIn = { showSignIn = true },
+                    localMedia = localMedia,
+                    hasMediaPermission = mediaPermissionGranted,
+                    onPlayLocal = { items, index -> playLocal(items, index) },
+                    onRequestMediaPermission = { mediaPermissionLauncher.launch(mediaPermissions()) },
+                    onRescanLocal = { scope.launch { localMediaRepo.refresh() } },
                 )
             }
         }
@@ -1532,6 +1694,16 @@ fun PlayerScreen(
                         .clip(androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
                 ) {
                     Thumbnail(nowPlayingThumbnail, 56.dp)
+                    if (queue.getOrNull(queueIndex)?.isVideo == true) {
+                        Text(
+                            "🎥",
+                            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.55f))
+                                .padding(1.dp)
+                        )
+                    }
                 }
                 Spacer(Modifier.width(8.dp))
                 Column(
@@ -2182,6 +2354,17 @@ fun PlayerScreen(
             )
         }
     }
+
+        val videoItem = queue.getOrNull(queueIndex)
+        if (showNowPlaying && isVideoMode && videoItem?.isVideo == true) {
+            VideoPlayerScreen(
+                mediaController = controller,
+                title = nowPlayingTitle ?: videoItem.title,
+                artist = nowPlayingArtist ?: videoItem.artist,
+                onBack = { showNowPlaying = false },
+                onAudioOnly = { isVideoMode = false }
+            )
+        }
 
         if (mixBuilding) {
             Box(

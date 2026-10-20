@@ -29,6 +29,7 @@ import com.sharl.musicapp.Downloader
 import com.sharl.musicapp.DownloadState
 import com.sharl.musicapp.QueueItem
 import com.sharl.musicapp.data.Download
+import com.sharl.musicapp.data.LocalMedia
 import com.sharl.musicapp.data.NowPlaying
 import com.sharl.musicapp.data.Playlist
 import com.sharl.musicapp.data.PlaylistRepository
@@ -87,6 +88,11 @@ fun ColumnScope.LibraryTab(
     onOpenFriend: (Profile) -> Unit,
     onFriendBack: () -> Unit,
     onSignIn: () -> Unit,
+    localMedia: List<LocalMedia>,
+    hasMediaPermission: Boolean,
+    onPlayLocal: (List<LocalMedia>, Int) -> Unit,
+    onRequestMediaPermission: () -> Unit,
+    onRescanLocal: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -129,6 +135,12 @@ fun ColumnScope.LibraryTab(
                     selected = libraryTab == 3,
                     onClick = { onLibraryTabChange(3) },
                     label = { Text("Friends", maxLines = 1, softWrap = false) }
+                )
+                Spacer(Modifier.width(8.dp))
+                FilterChip(
+                    selected = libraryTab == 4,
+                    onClick = { onLibraryTabChange(4) },
+                    label = { Text("Local", maxLines = 1, softWrap = false) }
                 )
             }
             Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
@@ -295,6 +307,19 @@ fun ColumnScope.LibraryTab(
                         )
                     },
                     onSignIn = { onSignIn() }
+                )
+            }
+            4 -> Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                LocalMediaScreen(
+                    localMedia = localMedia,
+                    hasPermission = hasMediaPermission,
+                    onPlay = { items, index -> onPlayLocal(items, index) },
+                    onRequestPermission = { onRequestMediaPermission() },
+                    onRescan = { onRescanLocal() }
                 )
             }
         }
