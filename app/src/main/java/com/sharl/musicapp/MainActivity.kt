@@ -571,6 +571,19 @@ fun PlayerScreen(
     // PlaybackCache. Returns null when a track isn't resolved yet, so callers
     // skip it instead of triggering a cold (blocking) yt-dlp extraction.
     fun cachedOnly(videoId: String): Pair<String, SongMetadata>? {
+        // Downloaded files win over stream URLs: they never expire and need no
+        // network, so the gapless window can include them unconditionally.
+        downloads.firstOrNull { it.videoId == videoId }?.let { row ->
+            val f = java.io.File(row.filePath)
+            if (f.exists()) {
+                return android.net.Uri.fromFile(f).toString() to SongMetadata(
+                    title = row.title,
+                    artist = row.artist,
+                    album = null,
+                    thumbnailUrl = row.thumbnailUrl
+                )
+            }
+        }
         urlCache[videoId]?.let { return it }
         PlaybackCache.get(videoId)?.let { c ->
             return c.url to SongMetadata(c.title, c.artist, c.album, c.thumbnailUrl)
@@ -659,7 +672,31 @@ fun PlayerScreen(
         }
     }
 
-    fun playFromQueue(items: List<QueueItem>, index: Int) {
+    // Silently download the next two suggestions so their playback is instant
+    // too. Serialised by Downloader's mutex; failures are swallowed.
+    fun downloadSuggestions(items: List<QueueItem>, startIndex: Int) {
+        val suggestions = (startIndex..(startIndex + 1)).mapNotNull { items.getOrNull(it) }
+        if (suggestions.isEmpty()) return
+        scope.launch {
+            for (s in suggestions) {
+                if (downloadRepo.get(s.videoId)?.let { java.io.File(it.filePath).exists() } == true) continue
+                val song = runCatching { repo.get(s.videoId) }.getOrNull()
+                try {
+                    Downloader.download(
+                        context, settings, s.videoId,
+                        song?.title ?: s.title,
+                        song?.artist ?: "",
+                        song?.thumbnailUrl,
+                        0L
+                    )
+                } catch (e: Exception) {
+                    Log.w("DOWNLOAD", "suggestion download failed ${s.videoId}", e)
+                }
+            }
+        }
+    }
+
+    fun playFromQueue(items: List<QueueItem>, index: Int, downloadAhead: Boolean = false) {
         if (controller == null) {
             status = "Connecting..."
             return
@@ -672,6 +709,7 @@ fun PlayerScreen(
         queueIndex = index
         val item = items[index]
         status = "Extracting..."
+        if (downloadAhead) downloadSuggestions(items, index + 1)
         playJob = scope.launch {
             try {
                 val result = extractOrCache(item.videoId)
@@ -1138,8 +1176,8 @@ fun PlayerScreen(
                         importRepo.preview(src, coroutineContext[Job])
                     }
                 },
-                onConfirm = { preview ->
-                    importJob = scope.launch { importRepo.commit(preview) }
+                onConfirm = { preview, downloadOffline ->
+                    importJob = scope.launch { importRepo.commit(preview, downloadOffline) }
                 },
                 onOpenPlaylist = { playlistId ->
                     importJob = null
@@ -1250,7 +1288,11 @@ fun PlayerScreen(
                     topArtistName = topArtistName,
                     forYouByArtist = forYouByArtist,
                     forYouFavorites = forYouFavorites,
-                    playFromQueue = { items, index -> playFromQueue(items, index) },
+                    playFromQueue = { items, index ->
+                        // Recommendations: warm the next two suggestions to disk
+                        // so their playback skips yt-dlp entirely.
+                        playFromQueue(items, index, downloadAhead = true)
+                    },
                     modifier = Modifier.weight(1f)
                 )
             }

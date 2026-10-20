@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -40,7 +41,7 @@ import com.sharl.musicapp.ui.components.ImportTrackRow
 fun ImportScreen(
     state: ImportState,
     onSourceChosen: (ImportSource) -> Unit,
-    onConfirm: (ImportPreview) -> Unit,
+    onConfirm: (ImportPreview, Boolean) -> Unit,
     onOpenPlaylist: (Long) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -48,6 +49,7 @@ fun ImportScreen(
     var urlText by remember { mutableStateOf("") }
     var pasteText by remember { mutableStateOf("") }
     var importedName by remember { mutableStateOf("") }
+    var downloadOffline by remember { mutableStateOf(true) }
 
     LaunchedEffect(state) {
         if (state is ImportState.Previewing) importedName = state.preview.sourceName
@@ -198,10 +200,57 @@ fun ImportScreen(
                         }
                     }
                 }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = downloadOffline,
+                        onCheckedChange = { downloadOffline = it }
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Download all songs for offline play (Recommended)",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            "This takes a few minutes but makes playback instant.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
                 Button(
-                    onClick = { onConfirm(preview) },
+                    onClick = { onConfirm(preview, downloadOffline) },
                     modifier = Modifier.fillMaxWidth().padding(16.dp)
                 ) { Text("Confirm import") }
+            }
+
+            is ImportState.DownloadingOffline -> Column(
+                modifier = Modifier.fillMaxWidth().weight(1f).padding(16.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "Downloading ${state.done} of ${state.total}…",
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(12.dp))
+                LinearProgressIndicator(
+                    progress = {
+                        if (state.total > 0) state.done.toFloat() / state.total else 0f
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    "Playback is instant once a song is downloaded. You can leave this screen — downloads continue in the background.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
             }
 
             is ImportState.Committing -> Column(

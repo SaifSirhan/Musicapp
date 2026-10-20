@@ -31,6 +31,8 @@ class SongRepository(context: Context) {
 
     fun recentlyPlayed() = dao.recentlyPlayed()
 
+    suspend fun get(videoId: String): Song? = dao.getById(videoId)
+
     suspend fun toggleFavorite(song: Song) {
         val existing = dao.getById(song.videoId)
         if (existing == null) {
