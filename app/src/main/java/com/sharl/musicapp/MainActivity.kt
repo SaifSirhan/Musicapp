@@ -297,6 +297,11 @@ fun PlayerScreen(
     val downloadStates by Downloader.states.collectAsState()
     val settings = remember { SettingsRepo(context) }
     var storageExternalState by remember { mutableStateOf(settings.storageExternal) }
+    var skipSecondsState by remember { mutableStateOf(settings.skipSeconds) }
+    var playbackSpeedState by remember { mutableStateOf(settings.playbackSpeed) }
+    var crossfadeSecondsState by remember { mutableStateOf(settings.crossfadeSeconds) }
+    var normalizeVolumeState by remember { mutableStateOf(settings.normalizeVolume) }
+    var undergroundLoading by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showImportAccount by remember { mutableStateOf(openImportOnStart) }
     var playlistListMenu by remember { mutableStateOf<Playlist?>(null) }
@@ -504,6 +509,12 @@ fun PlayerScreen(
             MediaController.releaseFuture(future)
             Log.d("CTRL", "MediaController released")
         }
+    }
+
+    // Phase 22: push the persisted speed onto a freshly connected controller.
+    // Later changes are applied by the service listening to SettingsRepo.
+    LaunchedEffect(controller, playbackSpeedState) {
+        runCatching { controller?.setPlaybackSpeed(playbackSpeedState) }
     }
 
     var notifPermissionGranted by remember { mutableStateOf(false) }
@@ -1097,6 +1108,85 @@ fun PlayerScreen(
         }
     }
 
+    // Phase 22: hide the track for future mixes and drop it from the active
+    // queue. Hiding the current track advances to the next one; hiding a track
+    // inside the player's loaded window rebuilds the window so the queue_index
+    // extras stay aligned with the compacted queue.
+    fun notInterested(song: Song) {
+        scope.launch { repo.hide(song) }
+        val idx = queue.indexOfFirst { it.videoId == song.videoId }
+        if (idx < 0) {
+            status = "Hidden: ${song.title}"
+            return
+        }
+        val updated = queue.filterIndexed { i, _ -> i != idx }
+        val c = controller
+        if (c == null) {
+            queue = updated
+            if (idx < queueIndex) queueIndex--
+            if (idx < windowStart) windowStart--
+            return
+        }
+        // Loaded MediaItems carry absolute queue indices in their request
+        // extras, so removing anything inside the loaded window (or before it)
+        // requires rebuilding; otherwise later transitions report stale indices.
+        val affectsWindow = idx < windowStart + c.mediaItemCount
+        when {
+            idx == queueIndex -> {
+                if (updated.isEmpty()) {
+                    c.clearMediaItems()
+                    c.stop()
+                    queue = emptyList()
+                    queueIndex = -1
+                    windowStart = 0
+                    showNowPlaying = false
+                    status = "Queue empty"
+                } else {
+                    playFromQueue(updated, idx.coerceAtMost(updated.size - 1))
+                }
+            }
+            affectsWindow -> {
+                // Restart the current logical track; its index shifts when the
+                // removed item was ahead of it.
+                playFromQueue(updated, if (idx < queueIndex) queueIndex - 1 else queueIndex)
+            }
+            else -> queue = updated
+        }
+        status = "Not interested: ${song.title}"
+    }
+
+    fun discoverUnderground() {
+        if (undergroundLoading) return
+        scope.launch {
+            undergroundLoading = true
+            status = "Digging for underground…"
+            try {
+                val picks = InnerTubeHelper.discoverUnderground(limit = 20)
+                if (picks.isEmpty()) {
+                    status = "No underground picks found"
+                    snackbarHostState.showSnackbar(
+                        "Couldn't find anything underground — check your connection."
+                    )
+                    return@launch
+                }
+                playFromQueue(
+                    picks.map { QueueItem(it.videoId, it.title, it.artist) },
+                    0,
+                    mixTitle = "Underground"
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                status = "Discovery failed: ${e.message}"
+                snackbarHostState.showSnackbar(
+                    "Couldn't reach the underground — check your connection."
+                )
+            } finally {
+                undergroundLoading = false
+            }
+        }
+    }
+
     fun toggleFollow(artist: String) {
         followRepo.toggle(artist)
         followedArtists = followRepo.artists()
@@ -1303,8 +1393,37 @@ fun PlayerScreen(
                         isPlaying = true
                     }
                 },
-                onPrev = { playPrev() },
-                onNext = { playNext() },
+                skipSeconds = skipSecondsState,
+                onSkipBack = {
+                    controller?.let { c ->
+                        c.seekTo((c.currentPosition - skipSecondsState * 1000L).coerceAtLeast(0L))
+                    }
+                },
+                onSkipForward = {
+                    controller?.let { c ->
+                        c.seekTo(c.currentPosition + skipSecondsState * 1000L)
+                    }
+                },
+                playbackSpeed = playbackSpeedState,
+                onPlaybackSpeedChange = { v ->
+                    playbackSpeedState = v
+                    settings.playbackSpeed = v
+                    runCatching { controller?.setPlaybackSpeed(v) }
+                },
+                onNotInterested = {
+                    queue.getOrNull(queueIndex)?.let { q ->
+                        notInterested(
+                            Song(
+                                videoId = q.videoId,
+                                title = nowPlayingTitle ?: q.title,
+                                artist = nowPlayingArtist ?: q.artist,
+                                thumbnailUrl = nowPlayingThumbnail,
+                                lastPlayedAt = 0L,
+                                playCount = 0
+                            )
+                        )
+                    }
+                },
                 onShuffleToggle = {
                     isShuffled = !isShuffled
                     controller?.shuffleModeEnabled = isShuffled
@@ -1369,6 +1488,27 @@ fun PlayerScreen(
                 onNotifyUpdatesChange = { v ->
                     notifyUpdates = v
                     settings.notifyUpdates = v
+                },
+                skipSeconds = skipSecondsState,
+                onSkipSecondsChange = { v ->
+                    skipSecondsState = v
+                    settings.skipSeconds = v
+                },
+                playbackSpeed = playbackSpeedState,
+                onPlaybackSpeedChange = { v ->
+                    playbackSpeedState = v
+                    settings.playbackSpeed = v
+                    runCatching { controller?.setPlaybackSpeed(v) }
+                },
+                crossfadeSeconds = crossfadeSecondsState,
+                onCrossfadeSecondsChange = { v ->
+                    crossfadeSecondsState = v
+                    settings.crossfadeSeconds = v
+                },
+                normalizeVolume = normalizeVolumeState,
+                onNormalizeVolumeChange = { v ->
+                    normalizeVolumeState = v
+                    settings.normalizeVolume = v
                 },
                 accentName = AccentOptions.getOrNull(accentIndex)?.name ?: "Default",
                 accentColor = AccentOptions.getOrNull(accentIndex)?.color ?: DefaultAccent,
@@ -1575,6 +1715,8 @@ fun PlayerScreen(
                         followedArtists.any { it.equals(a, ignoreCase = true) }
                     } ?: false,
                     onToggleFollowTopArtist = { topArtistName?.let { toggleFollow(it) } },
+                    onDiscoverUnderground = { discoverUnderground() },
+                    undergroundLoading = undergroundLoading,
                 )
             }
             3 -> {
@@ -1942,7 +2084,7 @@ fun PlayerScreen(
                             }
                     }
                     MenuItem("Not interested") {
-                        scope.launch { repo.hide(song) }
+                        notInterested(song)
                         menuSong = null
                     }
                 }

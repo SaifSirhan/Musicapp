@@ -71,4 +71,24 @@ interface SongDao {
 
     @Query("SELECT * FROM songs WHERE isHidden = 0 AND artist = :artist ORDER BY RANDOM() LIMIT :limit")
     suspend fun randomSongsByArtist(artist: String, limit: Int): List<Song>
+
+    @Query("SELECT videoId FROM songs WHERE isHidden = 1")
+    suspend fun hiddenIds(): List<String>
+
+    @Query("""
+        SELECT * FROM songs
+        WHERE isHidden = 0 AND album = :album AND album IS NOT NULL AND album != ''
+        ORDER BY title COLLATE NOCASE
+        LIMIT :limit
+    """)
+    suspend fun songsByAlbum(album: String, limit: Int): List<Song>
+
+    @Query("""
+        SELECT album FROM songs
+        WHERE isHidden = 0 AND album IS NOT NULL AND album != ''
+        GROUP BY album
+        ORDER BY RANDOM()
+        LIMIT 1
+    """)
+    suspend fun randomAlbum(): String?
 }

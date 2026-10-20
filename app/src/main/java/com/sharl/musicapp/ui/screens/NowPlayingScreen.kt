@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
@@ -26,6 +27,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -84,8 +86,12 @@ fun NowPlayingScreen(
     onStartMix: () -> Unit,
     onBack: () -> Unit,
     onPlayPause: () -> Unit,
-    onPrev: () -> Unit,
-    onNext: () -> Unit,
+    skipSeconds: Int = 15,
+    onSkipBack: () -> Unit = {},
+    onSkipForward: () -> Unit = {},
+    playbackSpeed: Float = 1f,
+    onPlaybackSpeedChange: (Float) -> Unit = {},
+    onNotInterested: () -> Unit = {},
     onShuffleToggle: () -> Unit,
     onRepeatToggle: () -> Unit
 ) {
@@ -95,7 +101,8 @@ fun NowPlayingScreen(
             .background(MaterialTheme.colorScheme.background)
             .padding(24.dp)
     ) {
-        // Top bar: back button
+        // Top bar: back on the left, "not interested" on the right so the
+        // current track can be hidden without opening its menu.
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -110,6 +117,10 @@ fun NowPlayingScreen(
                         style = MaterialTheme.typography.headlineMedium
                     )
                 }
+            }
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = onNotInterested) {
+                Text("👎", style = MaterialTheme.typography.titleLarge)
             }
         }
 
@@ -140,6 +151,8 @@ fun NowPlayingScreen(
         val queueListState = rememberLazyListState()
 
         var showExtracting by remember { mutableStateOf(false) }
+        var showSpeedDialog by remember { mutableStateOf(false) }
+        var speedDraft by remember(playbackSpeed) { mutableStateOf(playbackSpeed) }
         LaunchedEffect(isLoading) {
             if (isLoading) {
                 delay(2000)
@@ -187,15 +200,37 @@ fun NowPlayingScreen(
                 }
                 Spacer(modifier = Modifier.size(16.dp))
 
-                // Title and artist, centered
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.headlineMedium,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                // Title and artist, centered; the speed chip sits at the end
+                // and opens the quick speed slider.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Spacer(Modifier.size(48.dp))
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.headlineMedium,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clickable {
+                                speedDraft = playbackSpeed
+                                showSpeedDialog = true
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            String.format(java.util.Locale.US, "%.1fx", playbackSpeed),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
                 Spacer(modifier = Modifier.size(8.dp))
                 Text(
                     text = artist,
@@ -429,10 +464,10 @@ fun NowPlayingScreen(
                 modifier = Modifier.size(48.dp),
                 contentAlignment = Alignment.Center
             ) {
-                IconButton(onClick = onPrev) {
-                    TransportIcon(
-                        kind = TransportKind.Previous,
-                        size = 32.dp,
+                IconButton(onClick = onSkipBack) {
+                    Text(
+                        "−${skipSeconds}s",
+                        style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                 }
@@ -463,10 +498,10 @@ fun NowPlayingScreen(
                 modifier = Modifier.size(48.dp),
                 contentAlignment = Alignment.Center
             ) {
-                IconButton(onClick = onNext) {
-                    TransportIcon(
-                        kind = TransportKind.Next,
-                        size = 32.dp,
+                IconButton(onClick = onSkipForward) {
+                    Text(
+                        "+${skipSeconds}s",
+                        style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                 }
@@ -494,10 +529,46 @@ fun NowPlayingScreen(
         }
 
         Spacer(modifier = Modifier.size(16.dp))
+
+        if (showSpeedDialog) {
+            AlertDialog(
+                onDismissRequest = { showSpeedDialog = false },
+                title = { Text("Playback speed") },
+                text = {
+                    Column {
+                        Text(
+                            String.format(java.util.Locale.US, "%.1fx", speedDraft),
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.fillMaxWidth(),
+                            textAlign = TextAlign.Center
+                        )
+                        Slider(
+                            value = speedDraft,
+                            onValueChange = { speedDraft = it },
+                            valueRange = 0.5f..5f,
+                            steps = 8
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        onPlaybackSpeedChange(speedDraft)
+                        showSpeedDialog = false
+                    }) { Text("Done") }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        speedDraft = playbackSpeed
+                        showSpeedDialog = false
+                    }) { Text("Cancel") }
+                }
+            )
+        }
     }
 }
 
-private enum class TransportKind { Previous, Play, Pause, Next }
+private enum class TransportKind { Play, Pause }
 
 /** Vector transport glyphs, drawn locally so the screen needs no icon artifact. */
 @Composable
@@ -523,31 +594,6 @@ private fun TransportIcon(kind: TransportKind, size: Dp, color: Color) {
                 val top = (h - barH) / 2f
                 drawRoundRect(color, Offset(w * 0.22f, top), Size(barW, barH), CornerRadius(barW / 4f))
                 drawRoundRect(color, Offset(w * 0.58f, top), Size(barW, barH), CornerRadius(barW / 4f))
-            }
-            TransportKind.Previous, TransportKind.Next -> {
-                val triH = h * 0.72f
-                val triW = w * 0.60f
-                val top = (h - triH) / 2f
-                val path = Path()
-                if (kind == TransportKind.Next) {
-                    path.moveTo(w * 0.16f, top)
-                    path.lineTo(w * 0.16f, top + triH)
-                    path.lineTo(w * 0.16f + triW, h / 2f)
-                } else {
-                    path.moveTo(w * 0.84f, top)
-                    path.lineTo(w * 0.84f, top + triH)
-                    path.lineTo(w * 0.84f - triW, h / 2f)
-                }
-                path.close()
-                drawPath(path, color)
-                val barW = w * 0.12f
-                val barX = if (kind == TransportKind.Next) w - barW else 0f
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(barX, top),
-                    size = Size(barW, triH),
-                    cornerRadius = CornerRadius(barW / 4f)
-                )
             }
         }
     }

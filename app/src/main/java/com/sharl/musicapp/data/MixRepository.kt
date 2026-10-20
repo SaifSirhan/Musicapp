@@ -15,16 +15,47 @@ class MixRepository(context: Context) {
         val started = System.currentTimeMillis()
         val related = fetchRelated(seed)
         val diversity = fetchDiversity(seed)
+        val hidden = runCatching { dao.hiddenIds() }.getOrDefault(emptyList()).toHashSet()
 
         val seen = hashSetOf(seed.videoId)
         // YouTube returns several uploads of the same recording (video/audio/
         // lyric versions), so dedupe on the title as well as the video id.
         val seenTitles = hashSetOf(titleKey(seed))
-        val pool = (related + diversity).filter { seen.add(it.videoId) && seenTitles.add(titleKey(it)) }
-        val mix = listOf(seed) + pool.shuffled()
+        val pool = (related + diversity).filter {
+            it.videoId !in hidden && seen.add(it.videoId) && seenTitles.add(titleKey(it))
+        }
+
+        // Phase 22: one in five mixes gets a short album run, kept contiguous
+        // and in album order instead of being shuffled with the rest.
+        val albumBlock = buildAlbumBlock(seed, related + diversity, hidden)
+            .filter { seen.add(it.videoId) && seenTitles.add(titleKey(it)) }
+        val shuffled = pool.shuffled()
+        val insertAt = if (albumBlock.isEmpty() || shuffled.isEmpty()) shuffled.size
+            else shuffled.indices.random()
+        val mix = listOf(seed) + shuffled.take(insertAt) + albumBlock + shuffled.drop(insertAt)
         Log.d("MIX", "seed=${seed.videoId} related=${related.size} diversity=${diversity.size} " +
-            "total=${mix.size} in ${System.currentTimeMillis() - started}ms")
+            "album=${albumBlock.size} hidden=${hidden.size} total=${mix.size} " +
+            "in ${System.currentTimeMillis() - started}ms")
         mix
+    }
+
+    // 20% of the time, queue 3-4 tracks from one album together. Song has no
+    // track-number column, so album order is approximated by title.
+    private suspend fun buildAlbumBlock(
+        seed: Song,
+        pool: List<Song>,
+        hidden: Set<String>
+    ): List<Song> {
+        if (kotlin.random.Random.nextInt(100) >= 20) return emptyList()
+        val album = seed.album?.takeIf { it.isNotBlank() }
+            ?: pool.mapNotNull { it.album?.takeIf(String::isNotBlank) }.randomOrNull()
+            ?: runCatching { dao.randomAlbum() }.getOrNull()
+            ?: return emptyList()
+        val tracks = dao.songsByAlbum(album, 4)
+            .filter { it.videoId !in hidden && it.videoId != seed.videoId }
+        if (tracks.size < 3) return emptyList()
+        Log.d("MIX", "album block: $album -> ${tracks.map { it.title }}")
+        return tracks
     }
 
     private suspend fun fetchRelated(seed: Song): List<Song> {

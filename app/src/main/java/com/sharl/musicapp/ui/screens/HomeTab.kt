@@ -63,15 +63,22 @@ fun ColumnScope.HomeTab(
     forYouFavorites: List<Song>,
     isFollowingTopArtist: Boolean = false,
     onToggleFollowTopArtist: () -> Unit = {},
+    onDiscoverUnderground: () -> Unit = {},
+    undergroundLoading: Boolean = false,
 ) {
     val quickPicks30 = androidx.compose.runtime.remember(forYouTop, forYouRecent) {
         val combined = (forYouTop + forYouRecent).distinctBy { it.videoId }
         combined.take(30)
     }
+    // Strict 5-per-page pagination: the pager count and each page's items come
+    // from the same chunk list, so page 1 can never spill into page 2.
+    val quickPickChunks = androidx.compose.runtime.remember(quickPicks30) {
+        quickPicks30.chunked(5)
+    }
     androidx.compose.runtime.LaunchedEffect(quickPicks30.firstOrNull()?.videoId) {
         quickPicks30.firstOrNull()?.videoId?.let { onPreExtract(it) }
     }
-    val quickPickPages = (quickPicks30.size + 5) / 6
+    val quickPickPages = quickPickChunks.size
     LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
@@ -93,8 +100,7 @@ fun ColumnScope.HomeTab(
                         modifier = Modifier.fillMaxWidth()
                     ) { page ->
                         Column(modifier = Modifier.fillMaxWidth()) {
-                            val start = page * 6
-                            val pageItems = quickPicks30.drop(start).take(6)
+                            val pageItems = quickPickChunks.getOrElse(page) { emptyList() }
                             pageItems.forEach { song ->
                                 Row(
                                     modifier = Modifier
@@ -163,6 +169,32 @@ fun ColumnScope.HomeTab(
                                         androidx.compose.foundation.shape.CircleShape
                                     )
                             )
+                        }
+                    }
+                }
+            }
+
+            item {
+                androidx.compose.foundation.layout.Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = onDiscoverUnderground,
+                        enabled = !undergroundLoading,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (undergroundLoading) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("Digging…")
+                        } else {
+                            Text("🎧  Discover Underground")
                         }
                     }
                 }

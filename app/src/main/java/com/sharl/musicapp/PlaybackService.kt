@@ -1,5 +1,8 @@
 package com.sharl.musicapp
 
+import android.content.Context
+import android.content.SharedPreferences
+import android.media.audiofx.LoudnessEnhancer
 import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -9,10 +12,25 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.sharl.musicapp.data.SettingsRepo
 
 class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
+    private var player: ExoPlayer? = null
+    private var loudnessEnhancer: LoudnessEnhancer? = null
+    private val settings by lazy { SettingsRepo(this) }
+    private val prefs by lazy { getSharedPreferences("settings", Context.MODE_PRIVATE) }
+
+    // The UI writes preferences through SettingsRepo; watching the same file
+    // here applies speed/crossfade/normalisation to an already-running player.
+    private val settingsListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            when (key) {
+                "playback_speed", "crossfade_seconds", "normalize_volume" ->
+                    applyPlaybackSettings()
+            }
+        }
 
     override fun onCreate() {
         super.onCreate()
@@ -30,11 +48,12 @@ class PlaybackService : MediaSessionService() {
         )
         val msFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dsFactory)
 
-        val player = ExoPlayer.Builder(this)
+        val exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(msFactory)
             .build()
+        player = exoPlayer
 
-        player.addListener(object : Player.Listener {
+        exoPlayer.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 Log.e("EXOPLAYER", "code=${error.errorCodeName} msg=${error.message}", error)
             }
@@ -63,13 +82,55 @@ class PlaybackService : MediaSessionService() {
             }
         })
 
-        mediaSession = MediaSession.Builder(this, player).build()
+        mediaSession = MediaSession.Builder(this, exoPlayer).build()
 
         val notificationProvider = DefaultMediaNotificationProvider.Builder(this).build()
         notificationProvider.setSmallIcon(R.drawable.ic_music_note)
         setMediaNotificationProvider(notificationProvider)
 
+        applyPlaybackSettings()
+        prefs.registerOnSharedPreferenceChangeListener(settingsListener)
+
         Log.d("CTRL", "PlaybackService created, MediaSession built")
+    }
+
+    private fun applyPlaybackSettings() {
+        val p = player ?: return
+        runCatching { p.setPlaybackSpeed(settings.playbackSpeed) }
+            .onFailure { Log.w("SPEED", "Could not apply playback speed", it) }
+
+        val crossfade = settings.crossfadeSeconds
+        // media3 1.10.1 has no Player.setCrossfadeDurationMs (verified against
+        // the cached AAR), so the spec's fallback is used: tighten the gaps by
+        // skipping silence. The requested duration is logged for diagnostics.
+        runCatching { p.setSkipSilenceEnabled(crossfade > 0) }
+            .onFailure { Log.w("CROSSFADE", "Skip-silence fallback unavailable", it) }
+        if (crossfade > 0) {
+            Log.i(
+                "CROSSFADE",
+                "Requested ${crossfade}s crossfade — setCrossfadeDurationMs is not " +
+                    "available in media3 1.10.1, using silence-skip fallback"
+            )
+        }
+
+        applyVolumeNormalization(p)
+    }
+
+    private fun applyVolumeNormalization(p: ExoPlayer) {
+        try {
+            if (!settings.normalizeVolume) {
+                loudnessEnhancer?.enabled = false
+                return
+            }
+            val fx = loudnessEnhancer ?: LoudnessEnhancer(p.audioSessionId).also {
+                it.setTargetGain(400) // +4 dB
+                loudnessEnhancer = it
+            }
+            fx.enabled = true
+            Log.d("AUDIO", "LoudnessEnhancer on, session=${p.audioSessionId}")
+        } catch (e: Exception) {
+            Log.w("AUDIO", "LoudnessEnhancer unavailable", e)
+        }
     }
 
     override fun onGetSession(
@@ -77,7 +138,11 @@ class PlaybackService : MediaSessionService() {
     ): MediaSession? = mediaSession
 
     override fun onDestroy() {
-        mediaSession?.player?.release()
+        prefs.unregisterOnSharedPreferenceChangeListener(settingsListener)
+        loudnessEnhancer?.release()
+        loudnessEnhancer = null
+        player?.release()
+        player = null
         mediaSession?.release()
         mediaSession = null
         Log.d("CTRL", "PlaybackService destroyed, player and session released")

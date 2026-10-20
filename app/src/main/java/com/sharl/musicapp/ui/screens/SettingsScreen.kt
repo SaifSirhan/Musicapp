@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,12 +21,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -67,6 +71,14 @@ fun SettingsScreen(
     onSignOut: () -> Unit = {},
     onCopyInvite: () -> Unit = {},
     onImportAccount: () -> Unit = {},
+    skipSeconds: Int = 15,
+    onSkipSecondsChange: (Int) -> Unit = {},
+    playbackSpeed: Float = 1f,
+    onPlaybackSpeedChange: (Float) -> Unit = {},
+    crossfadeSeconds: Int = 0,
+    onCrossfadeSecondsChange: (Int) -> Unit = {},
+    normalizeVolume: Boolean = false,
+    onNormalizeVolumeChange: (Boolean) -> Unit = {},
     friends: List<Profile> = emptyList(),
     addFriendCode: String = "",
     onAddFriendCodeChange: (String) -> Unit = {},
@@ -234,8 +246,99 @@ fun SettingsScreen(
         OutlinedButton(onClick = onImportAccount) { Text("Import from Spotify") }
         HorizontalDivider()
 
-        // Playback — intentionally empty in 15d; gapless toggle lands here in 15e.
+        // Playback — Phase 22: skip duration, speed, crossfade and loudness.
         SettingsSectionHeader("Playback")
+        Text(
+            "Skip duration",
+            style = MaterialTheme.typography.bodyLarge
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            listOf(5, 10, 15, 30).forEach { seconds ->
+                FilterChip(
+                    selected = skipSeconds == seconds,
+                    onClick = { onSkipSecondsChange(seconds) },
+                    label = { Text("${seconds}s") }
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Playback speed",
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                String.format(java.util.Locale.US, "%.1fx", playbackSpeed),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        Slider(
+            value = playbackSpeed,
+            onValueChange = onPlaybackSpeedChange,
+            valueRange = 0.5f..5f,
+            steps = 8,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Text(
+            "Crossfade",
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            listOf(0, 2, 5, 10, 15, 20, 30).forEach { seconds ->
+                FilterChip(
+                    selected = crossfadeSeconds == seconds,
+                    onClick = { onCrossfadeSecondsChange(seconds) },
+                    label = { Text(if (seconds == 0) "Off" else "${seconds}s") }
+                )
+            }
+        }
+        if (crossfadeSeconds > 0) {
+            Text(
+                "This player build has no true crossfade, so silence is skipped " +
+                    "between tracks instead.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Normalize volume", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "Boosts quiet tracks with LoudnessEnhancer",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = normalizeVolume,
+                onCheckedChange = onNormalizeVolumeChange
+            )
+        }
         HorizontalDivider()
 
         SettingsSectionHeader("Notifications")

@@ -17,6 +17,24 @@ class SettingsRepo(context: Context) {
         get() = prefs.getBoolean("notify_updates", true)
         set(v) { prefs.edit().putBoolean("notify_updates", v).apply() }
 
+    // Phase 22 playback customisation. The keys are watched by PlaybackService,
+    // so writing them is enough to apply a change to the running player.
+    var skipSeconds: Int
+        get() = prefs.getInt("skip_seconds", 15)
+        set(v) { prefs.edit().putInt("skip_seconds", v.coerceIn(5, 30)).apply() }
+
+    var playbackSpeed: Float
+        get() = prefs.getFloat("playback_speed", 1f).coerceIn(0.5f, 5f)
+        set(v) { prefs.edit().putFloat("playback_speed", v.coerceIn(0.5f, 5f)).apply() }
+
+    var crossfadeSeconds: Int
+        get() = prefs.getInt("crossfade_seconds", 0)
+        set(v) { prefs.edit().putInt("crossfade_seconds", v.coerceIn(0, 30)).apply() }
+
+    var normalizeVolume: Boolean
+        get() = prefs.getBoolean("normalize_volume", false)
+        set(v) { prefs.edit().putBoolean("normalize_volume", v).apply() }
+
     // OAuth access token for the YouTube Data API (account import). Google
     // access tokens live ~1h; storedAt lets us treat stale ones as missing.
     var googleAccessToken: String

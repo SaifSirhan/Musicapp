@@ -12,7 +12,9 @@ data class RelatedVideo(
     val videoId: String,
     val title: String,
     val artist: String,
-    val thumbnailUrl: String?
+    val thumbnailUrl: String?,
+    // Only some search layouts expose this; null means "unknown".
+    val subscribers: Long? = null
 )
 
 object InnerTubeHelper {
@@ -257,7 +259,10 @@ object InnerTubeHelper {
                                 val thumbs = r.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
                                 val thumb = thumbs?.optJSONObject((thumbs.length() - 1).coerceAtLeast(0))
                                     ?.optString("url")
-                                out.putIfAbsent(id, RelatedVideo(id, title, artist, thumb))
+                                out.putIfAbsent(
+                                    id,
+                                    RelatedVideo(id, title, artist, thumb, subscriberCount(r))
+                                )
                             }
                         }
                         item.optJSONObject("lockupViewModel")?.let { r ->
@@ -288,4 +293,49 @@ object InnerTubeHelper {
             }
             out.values.toList()
         }
+
+    // Discover Underground: a handful of genre searches, dropping channels that
+    // advertise >100k subscribers when the search layout reports a count.
+    suspend fun discoverUnderground(limit: Int = 20): List<RelatedVideo> =
+        withContext(Dispatchers.IO) {
+            val out = LinkedHashMap<String, RelatedVideo>()
+            for (genre in UNDERGROUND_GENRES.shuffled()) {
+                if (out.size >= limit) break
+                runCatching { searchVideos(genre, limit = 12) }
+                    .getOrDefault(emptyList())
+                    .filter { it.subscribers == null || it.subscribers < 100_000 }
+                    .forEach { out.putIfAbsent(it.videoId, it) }
+            }
+            Log.d("DISCOVER", "underground picks: ${out.size}")
+            out.values.shuffled().take(limit)
+        }
+
+    private fun subscriberCount(r: JSONObject): Long? {
+        val text = runsText(r.optJSONObject("subscriberCountText"))
+            .ifBlank {
+                runsText(
+                    r.optJSONObject("videoOwnerRenderer")
+                        ?.optJSONObject("subscriberCountText")
+                )
+            }
+        if (text.isBlank()) return null
+        val match = SUBSCRIBER.find(text) ?: return null
+        val value = match.groupValues[1].replace(",", "").toDoubleOrNull() ?: return null
+        return (value * when (match.groupValues[2].lowercase()) {
+            "k" -> 1_000
+            "m" -> 1_000_000
+            "b" -> 1_000_000_000
+            else -> 1
+        }).toLong()
+    }
+
+    private val UNDERGROUND_GENRES = listOf(
+        "indie shoegaze",
+        "underground rap 2024",
+        "bedroom pop",
+        "underground electronic",
+        "post punk revival",
+        "lo-fi jazz"
+    )
+    private val SUBSCRIBER = Regex("([0-9][0-9.,]*)\\s*([KkMmBb])?")
 }
