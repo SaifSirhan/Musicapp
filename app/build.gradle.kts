@@ -62,6 +62,11 @@ android {
         buildConfigField("String", "SUPABASE_URL", "\"${secret("SUPABASE_URL")}\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"${secret("SUPABASE_ANON_KEY")}\"")
         buildConfigField("String", "GOOGLE_WEB_CLIENT_ID", "\"${secret("GOOGLE_WEB_CLIENT_ID")}\"")
+        // Browser OAuth for YouTube import. The redirect must be registered as an
+        // authorized redirect URI on a Web-type OAuth client; the secret is only
+        // needed for that client to accept the code exchange.
+        buildConfigField("String", "GOOGLE_OAUTH_REDIRECT_URI", "\"${secret("GOOGLE_OAUTH_REDIRECT_URI")}\"")
+        buildConfigField("String", "GOOGLE_OAUTH_CLIENT_SECRET", "\"${secret("GOOGLE_OAUTH_CLIENT_SECRET")}\"")
         // OTA manifest lives on GitHub Releases (APK is ~200 MB; Supabase free
         // tier caps uploads at 50 MB). Read via secret() so it can be set in
         // secrets.properties or as a -P/gradle.properties property.

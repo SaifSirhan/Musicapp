@@ -82,9 +82,6 @@ fun ImportAccountScreen(
     var status by remember { mutableStateOf<String?>(null) }
     var localError by remember { mutableStateOf<String?>(null) }
     val selected = remember { mutableStateMapOf<String, Boolean>() }
-    // Non-null while the user picks which Google account to import from.
-    var accountChooser by remember { mutableStateOf<List<android.accounts.Account>?>(null) }
-    var selectedYoutubeEmail by remember { mutableStateOf<String?>(null) }
 
     val running = importState is ImportState.Running
 
@@ -98,60 +95,23 @@ fun ImportAccountScreen(
         localError = null
     }
 
-    val authorizationClient = remember { Identity.getAuthorizationClient(context) }
     val authRepo = remember { AuthRepository() }
-    val ytmLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartIntentSenderForResult()
-    ) { result ->
-        val data = result.data
-        if (result.resultCode == Activity.RESULT_OK && data != null) {
-            runCatching { authorizationClient.getAuthorizationResultFromIntent(data) }
-                .onSuccess { applyYtmToken(it.accessToken) }
-                .onFailure { localError = it.message ?: "YouTube authorization failed." }
-        } else {
-            localError = "YouTube authorization was cancelled."
-        }
-    }
+    val ytmConnecting by YtmImporter.connecting.collectAsState()
+    val ytmError by YtmImporter.error.collectAsState()
 
-    fun authorizeYoutubeAs(account: android.accounts.Account) {
-        accountChooser = null
-        localError = null
-        scope.launch {
-            val auth = try {
-                authRepo.authorizeYoutube(context, account)
-            } catch (e: Exception) {
-                localError = e.message ?: "YouTube authorization failed."
-                return@launch
-            }
-            selectedYoutubeEmail = account.name
-            val pending = auth.pendingIntent
-            if (auth.hasResolution() && pending != null) {
-                ytmLauncher.launch(
-                    IntentSenderRequest.Builder(pending.intentSender).build()
-                )
-            } else {
-                applyYtmToken(auth.accessToken)
-            }
+    // The browser redirects back into MainActivity, which hands the code to
+    // YtmImporter; the token shows up here and is stored like before.
+    LaunchedEffect(Unit) {
+        YtmImporter.tokenResult.collect { token ->
+            if (token != null) applyYtmToken(YtmImporter.consumeToken())
         }
     }
 
     fun connectYoutube() {
         localError = null
-        scope.launch {
-            val accounts = runCatching { authRepo.googleAccounts(context) }
-                .onFailure { localError = it.message ?: "Could not list Google accounts." }
-                .getOrDefault(emptyList())
-            when {
-                accounts.isEmpty() ->
-                    localError = "No Google account is available on this device. " +
-                        "Add one in system settings, then try again."
-                accounts.size == 1 -> authorizeYoutubeAs(accounts.first())
-                else -> {
-                    // Disconnect was used at least once, so the user is
-                    // switching accounts: always make them pick.
-                    accountChooser = accounts
-                }
-            }
+        YtmImporter.clearError()
+        if (!YtmImporter.authorize(context)) {
+            localError = YtmImporter.error.value ?: "Could not start Google sign-in."
         }
     }
 
@@ -164,7 +124,6 @@ fun ImportAccountScreen(
         selected.keys.filter { it.startsWith("ytm:") }.forEach { selected.remove(it) }
         scope.launch {
             val revoked = authRepo.revokeYoutubeAccess(context)
-            selectedYoutubeEmail = null
             localError = if (revoked) {
                 "YouTube disconnected. Tap Connect YouTube Music to choose an account."
             } else {
@@ -401,26 +360,6 @@ fun ImportAccountScreen(
         HorizontalDivider()
 
         SettingsSectionHeader("YouTube Music")
-        val chooser = accountChooser
-        if (chooser != null) {
-            Text(
-                "Choose the Google account to import from:",
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-            chooser.forEach { account ->
-                TextButton(
-                    onClick = { authorizeYoutubeAs(account) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(account.name)
-                }
-            }
-            TextButton(onClick = {
-                accountChooser = null
-                connectYoutube()
-            }) { Text("Refresh account list") }
-        }
         if (ytmToken == null) {
             if (!signedIn) {
                 Text(
@@ -430,10 +369,22 @@ fun ImportAccountScreen(
                 )
             }
             Spacer(Modifier.height(8.dp))
-            if (chooser == null) {
-                Button(onClick = { connectYoutube() }) {
-                    Text("Connect YouTube Music")
-                }
+            Button(onClick = { connectYoutube() }, enabled = !ytmConnecting) {
+                Text(if (ytmConnecting) "Waiting for Google…" else "Connect YouTube Music")
+            }
+            Text(
+                "Opens your browser so you can pick or type any Google account.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+            (localError ?: ytmError)?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
             }
         } else {
             Row(
@@ -441,8 +392,7 @@ fun ImportAccountScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "YouTube connected" +
-                        (selectedYoutubeEmail ?: accountEmail)?.let { " ($it)" } ?: "",
+                    "YouTube connected" + (accountEmail?.let { " ($it)" } ?: ""),
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.weight(1f)
                 )
