@@ -1,0 +1,7 @@
+{
+  "versionCode": 17,
+  "versionName": "0.17.0",
+  "apkUrl": "https://github.com/SaifSirhan/Musicapp/releases/download/v0.17.0/app-release.apk",
+  "sha256": "372f471716b65ad9ccb68249e8eea6044e8ab11ac525d1127f52e359941813ca",
+  "notes": "Phase 24: saved/playlist playback now falls back to a local download when YouTube blocks the stream, new Artist page, and consistent song menus across the app. OTA checks use the stable /releases/latest URL."
+}
