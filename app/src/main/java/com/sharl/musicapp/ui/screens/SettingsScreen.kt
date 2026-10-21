@@ -33,6 +33,10 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -89,9 +93,12 @@ fun SettingsScreen(
     innerTubeFailCount: Int = 0,
     onCheckForUpdates: () -> Unit = {},
     onDownloadUpdate: (UpdateInfo) -> Unit = {},
-    onInstallUpdate: (File) -> Unit = {}
+    onInstallUpdate: (File) -> Unit = {},
+    onOpenDiagnostics: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    // Hidden developer entry: seven taps on the About version line.
+    var versionTaps by remember { mutableStateOf(0) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -152,7 +159,14 @@ fun SettingsScreen(
         Text(
             "Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.clickable {
+                versionTaps++
+                if (versionTaps >= 7) {
+                    versionTaps = 0
+                    onOpenDiagnostics()
+                }
+            }
         )
         HorizontalDivider()
 

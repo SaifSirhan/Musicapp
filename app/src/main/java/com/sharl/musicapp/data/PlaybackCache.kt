@@ -70,6 +70,7 @@ object PlaybackCache {
         // LRU touch
         mem.remove(videoId)
         mem[videoId] = e
+        DiagnosticsManager.recordCacheHit(videoId)
         return e
     }
 

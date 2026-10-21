@@ -70,6 +70,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.sharl.musicapp.data.AppDatabase
 import com.sharl.musicapp.data.AuthRepository
+import com.sharl.musicapp.data.DiagnosticsManager
 import com.sharl.musicapp.data.Download
 import com.sharl.musicapp.data.DownloadRepository
 import com.sharl.musicapp.data.FollowRepository
@@ -237,6 +238,9 @@ fun PlayerScreen(
     // In-flight queue rebuild. A new play request cancels it so rapid skips
     // can't race two setMediaItems calls against a stale queue index.
     var playJob by remember { mutableStateOf<Job?>(null) }
+    // Background warm-up of the following tracks into PlaybackCache; cancelled
+    // by the next play request so stale tracks stop competing for the resolver.
+    var prefetchJob by remember { mutableStateOf<Job?>(null) }
     // Queue index that maps to player position 0 of the currently loaded
     // MediaItem window. The player only ever holds a contiguous slice
     // [windowStart .. windowStart + mediaItemCount - 1] of [queue].
@@ -323,6 +327,7 @@ fun PlayerScreen(
     var showRemoveAllDownloads by remember { mutableStateOf(false) }
     var showClearLibraryConfirm by remember { mutableStateOf(false) }
     var showPrivacyPolicy by remember { mutableStateOf(false) }
+    var showDiagnostics by remember { mutableStateOf(false) }
     var notifyUpdates by remember { mutableStateOf(settings.notifyUpdates) }
     var removalProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
 
@@ -615,12 +620,13 @@ fun PlayerScreen(
     // doesn't exist yet (search-and-play inserts it only after resolution).
     suspend fun resolveRemote(
         videoId: String,
-        fallbackTitle: String? = null
+        fallbackTitle: String? = null,
+        immediateUse: Boolean = false
     ): Pair<String, SongMetadata>? {
         val started = System.currentTimeMillis()
         val song = runCatching { repo.get(videoId) }.getOrNull()
         val title = song?.title ?: fallbackTitle ?: videoId
-        val fast = InnerTubeHelper.getStreamUrl(videoId)
+        val fast = InnerTubeHelper.getStreamUrl(videoId, immediateUse)
         if (fast != null) {
             ResolutionStats.recordFast(context)
             fastEngine = true
@@ -636,7 +642,15 @@ fun PlayerScreen(
         ResolutionStats.recordFallback(context)
         innerTubeFailCount += 1
         fastEngine = false
-        return YtdlpHelper.extractUrlAndMetadata(context, videoId)
+        val ytdlpStarted = System.currentTimeMillis()
+        try {
+            val result = YtdlpHelper.extractUrlAndMetadata(context, videoId)
+            DiagnosticsManager.recordYtdlp(result != null, System.currentTimeMillis() - ytdlpStarted)
+            return result
+        } catch (e: Exception) {
+            DiagnosticsManager.recordYtdlp(false, System.currentTimeMillis() - ytdlpStarted, e.message ?: e.javaClass.simpleName)
+            throw e
+        }
     }
 
     // Fire-and-forget background extraction into the cache. Never plays, never
@@ -650,7 +664,9 @@ fun PlayerScreen(
         extractMutex.withLock {
             if (PlaybackCache.get(videoId) != null) return@withLock
             try {
-                val pre = resolveRemote(videoId, title)
+                // The next track is prefetched moments before it plays, so any
+                // failure here is felt immediately: skip the slow clients now.
+                val pre = resolveRemote(videoId, title, immediateUse = true)
                 if (pre != null) {
                     val (u, m) = pre
                     PlaybackCache.put(videoId, u, m.title, m.artist, m.album, m.thumbnailUrl)
@@ -675,7 +691,8 @@ fun PlayerScreen(
         videoId: String,
         fallbackTitle: String? = null,
         localUri: String? = null,
-        localArtist: String = ""
+        localArtist: String = "",
+        immediateUse: Boolean = false
     ): Pair<String, SongMetadata> {
         // Local Media Hub: the queue item already points at playable content.
         if (localUri != null) {
@@ -728,7 +745,7 @@ fun PlayerScreen(
         loadingVideoId = videoId
         try {
             val result = extractMutex.withLock {
-                resolveRemote(videoId, fallbackTitle)
+                resolveRemote(videoId, fallbackTitle, immediateUse)
             } ?: throw StreamingBlockedException().also {
                 Log.e("RESOLVE", "both InnerTube and yt-dlp failed for $videoId")
             }
@@ -743,8 +760,9 @@ fun PlayerScreen(
 
     // --- Gapless playback helpers -------------------------------------------
     // How many tracks ahead of the current one we try to keep resolved inside
-    // the ExoPlayer playlist so it can advance natively (no gap).
-    val PRELOAD_AHEAD = 3
+    // the ExoPlayer playlist so it can advance natively (no gap). Each start
+    // also warms this many tracks into PlaybackCache in the background.
+    val PRELOAD_AHEAD = 4
 
     // Non-blocking cache lookup: in-session map first, then the persistent
     // PlaybackCache. Returns null when a track isn't resolved yet, so callers
@@ -937,20 +955,78 @@ fun PlayerScreen(
             return
         }
         if (index !in items.indices) return
+        // The service keeps its playlist while the UI is gone; after an app
+        // restart the loaded window must be re-adopted or the "already loaded"
+        // check below would reset a perfectly playable queue.
+        if (items !== queue &&
+            !(queue.size == items.size && queue.zip(items).all { (a, b) -> a.videoId == b.videoId })
+        ) {
+            val c = controller!!
+            if (c.mediaItemCount > 0 && c.currentMediaItemIndex >= 0) {
+                windowStart = index - c.currentMediaItemIndex
+            }
+        }
         // Any regular play request leaves the radio station; a mix request sets
         // its seed so the Queue tab can show "Mix: …".
         activeMixTitle = mixTitle
         // Supersede any in-flight rebuild: rapid Next taps must not leave two
         // setMediaItems calls racing against different queue indices.
         playJob?.cancel()
+        prefetchJob?.cancel()
         queue = items
         queueIndex = index
         val item = items[index]
         status = "Extracting..."
         if (downloadAhead) downloadSuggestions(items, index + 1)
+
+        // Replaying a track already inside the loaded window (e.g. a single-track
+        // queue restarted at the true end) must not reset it: the untouched
+        // tail keeps advancing natively instead of stopping after this track.
+        val live = controller
+        val windowTag = live?.currentMediaItem?.requestMetadata?.extras
+            ?.getInt("queue_index", -1) ?: -1
+        val loaded = windowTag >= 0 && windowStart + live!!.currentMediaItemIndex == windowTag
+        if (loaded && live != null) {
+            val loadedVideoId = live.currentMediaItem?.mediaId
+            queueIndex = windowStart + live.currentMediaItemIndex
+            status = "Playing: ${queue.getOrNull(queueIndex)?.title ?: item.title}"
+            if (loadedVideoId == item.videoId) {
+                live.play()
+            } else {
+                // Item is already prepared: a native, gapless seek.
+                live.seekToDefaultPosition(live.currentMediaItemIndex)
+                live.play()
+            }
+            presentTrack(queueIndex, null)
+            return
+        }
+
+        // Part B: resolution of the following tracks starts immediately, not
+        // after the seed finishes resolving — each one fetches back-to-back from
+        // InnerTube into PlaybackCache so Next is instant and gapless.
+        val upcoming = (index + 1..index + prefetchAhead).filter { it < items.size }
+        prefetchJob = scope.launch {
+            var queued = 0
+            for (idx in upcoming) {
+                val next = items.getOrNull(idx) ?: continue
+                if (next.localUri == null) {
+                    preExtract(next.videoId, next.title)
+                    queued++
+                }
+                syncPlayerWindow(queueIndex)
+            }
+            DiagnosticsManager.recordPrefetch(
+                "Queued $queued track${if (queued == 1) "" else "s"}" +
+                    if (queued < upcoming.size) " (${upcoming.size - queued} already cached/downloaded)" else ""
+            )
+        }
+
         playJob = scope.launch {
             try {
-                val result = extractOrCache(item.videoId, item.title, item.localUri, item.artist)
+                // A fresh queue start is user-facing now: skip slow clients.
+                val result = extractOrCache(
+                    item.videoId, item.title, item.localUri, item.artist, immediateUse = true
+                )
                 // A superseded request may finish extraction after cancellation;
                 // never apply its stale window.
                 ensureActive()
@@ -975,18 +1051,9 @@ fun PlayerScreen(
                 controller!!.play()
                 isPlaying = true
                 presentTrack(index, meta)
-
-                // Warm the cache for the upcoming tracks, then extend the loaded
-                // window with whatever became available so the next transitions
-                // are gapless too. Serialized via extractMutex. Mixes ask for a
-                // wider warm-up (first five tracks) so skips start instantly.
-                val upcoming = (index + 1..index + prefetchAhead)
-                    .filter { it < items.size }
-                for (idx in upcoming) {
-                    ensureActive()
-                    if (items[idx].localUri == null) preExtract(items[idx].videoId, items[idx].title)
-                    syncPlayerWindow(queueIndex)
-                }
+                // Extend the window with whatever the prefetch resolved while
+                // the seed was extracting.
+                syncPlayerWindow(queueIndex)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1749,7 +1816,29 @@ fun PlayerScreen(
                 onImportAccount = {
                     showSettings = false
                     showImportAccount = true
+                },
+                onOpenDiagnostics = {
+                    showSettings = false
+                    showDiagnostics = true
                 }
+            )
+        } else if (showDiagnostics) {
+            androidx.activity.compose.BackHandler(enabled = true) {
+                showDiagnostics = false
+                showSettings = true
+            }
+            com.sharl.musicapp.ui.screens.DiagnosticsScreen(
+                onBack = {
+                    showDiagnostics = false
+                    showSettings = true
+                },
+                onCopy = { text ->
+                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("MusicApp diagnostics", text))
+                    scope.launch { snackbarHostState.showSnackbar("Diagnostics copied.") }
+                },
+                onReset = { DiagnosticsManager.reset() }
             )
         } else if (showImportAccount) {
             androidx.activity.compose.BackHandler(enabled = true) {
