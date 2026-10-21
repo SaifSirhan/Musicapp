@@ -65,6 +65,7 @@ fun DiagnosticsScreen(
         StatLine("Last cache hit", state.lastCacheHit?.let { "${it.text}  ·  ${time(it.at)}" })
         StatLine("Prefetch", state.prefetch?.let { "${it.text}  ·  ${time(it.at)}" })
         StatLine("Search", state.lastSearch?.let { "${it.text}  ·  ${time(it.at)}" })
+        StatLine("Player error", state.lastPlayerError?.let { "${it.text}  ·  ${time(it.at)}" })
 
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

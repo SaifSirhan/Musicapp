@@ -99,6 +99,7 @@ import com.sharl.musicapp.data.SpeedDialSlot
 import com.sharl.musicapp.data.SpotifyImporter
 import com.sharl.musicapp.data.UpdateRepository
 import com.sharl.musicapp.data.UpdateState
+import com.sharl.musicapp.data.YtmImporter
 import java.io.File
 import com.sharl.musicapp.ui.components.MenuItem
 import com.sharl.musicapp.ui.components.SongActionsSheet
@@ -137,6 +138,13 @@ data class QueueItem(
 
 private fun isLocalUri(uri: String): Boolean =
     uri.startsWith("content://") || uri.startsWith("file://")
+
+// The failing cause, not the recovery wrapper: ExoPlayer's HttpDataSource already
+// includes the CDN's HTTP status ("...502: Response code: 403").
+private fun PlaybackException.diagnostic(): String {
+    val detail = message.orEmpty().take(140).ifBlank { "no detail" }
+    return "code $errorCode · $detail"
+}
 
 class MainActivity : ComponentActivity() {
     // Set when the Spotify redirect arrives before the UI exists (cold start),
@@ -191,7 +199,13 @@ class MainActivity : ComponentActivity() {
         val data = intent?.data ?: return
         if (data.scheme == "com.sharl.musicapp" && data.host == "callback") {
             pendingImportRedirect = true
-            SpotifyImporter.handleRedirect(applicationContext, data)
+            // Spotify and Google share the callback route; tell them apart by
+            // the OAuth state each flow stored before opening the browser.
+            if (YtmImporter.matchesPendingState(applicationContext, data)) {
+                YtmImporter.handleRedirect(applicationContext, data)
+            } else {
+                SpotifyImporter.handleRedirect(applicationContext, data)
+            }
         }
     }
 }
@@ -1084,6 +1098,9 @@ fun PlayerScreen(
                     code == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
                     code == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
                     code == PlaybackException.ERROR_CODE_IO_NO_PERMISSION
+                // "YouTube API blocked" used to be shown for every failure, which
+                // hid 404s and timeouts behind a 403 story. Keep the cause.
+                DiagnosticsManager.recordPlayerError(code, error.message.orEmpty())
                 if (!ioFailure || recoveringVideoId != null) return
                 // Prefer the failing MediaItem's queue tag: on a gapless
                 // transition queueIndex may not have caught up yet.
@@ -1095,9 +1112,7 @@ fun PlayerScreen(
                 val key = "${q.videoId}:$idx"
                 if (!recoveryAttempts.add(key)) {
                     scope.launch {
-                        snackbarHostState.showSnackbar(
-                            "Streaming failed: YouTube API blocked."
-                        )
+                        snackbarHostState.showSnackbar("Streaming failed: ${error.diagnostic()}")
                     }
                     return
                 }
@@ -1113,9 +1128,7 @@ fun PlayerScreen(
                     recoveringVideoId = null
                     if (file == null) {
                         status = "Streaming blocked"
-                        snackbarHostState.showSnackbar(
-                            "Streaming failed: YouTube API blocked."
-                        )
+                        snackbarHostState.showSnackbar("Streaming failed: ${error.diagnostic()}")
                         return@launch
                     }
                     Log.d("PLAYBACK", "recovered ${q.videoId} via local cache")
