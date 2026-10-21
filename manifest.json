@@ -2,6 +2,6 @@
   "versionCode": 19,
   "versionName": "0.18.0",
   "apkUrl": "https://github.com/SaifSirhan/Musicapp/releases/download/v0.18.0/app-release.apk",
-  "sha256": "3a82940432bd400f68473767fc4e2758bd4640778f69640bf70c79e9bc26b6fb",
-  "notes": "Phase 27: hidden Diagnostics screen (tap the version line 7 times in Settings), 4-track prefetch that starts before the current track resolves, InnerTube TVHTML5_SIMPLY_EMBEDDED_PLAYER fallback, and ciphered-only audio treated as a failed client instead of a 403 in the player."
+  "sha256": "deaa2c8b4b370e68daaa22b6bc5335f567c8e6252c4f11d120278ef0547fbcdf",
+  "notes": "Phase 27: hidden Diagnostics screen (tap the version line 7 times in Settings), 4-track prefetch that starts before the current track resolves, InnerTube TVHTML5_SIMPLY_EMBEDDED_PLAYER fallback, and ciphered-only audio treated as a failed client instead of a 403 in the player. Phase 27b: search now uses InnerTube instead of yt-dlp."
 }
