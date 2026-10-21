@@ -1,7 +1,7 @@
 {
-  "versionCode": 17,
-  "versionName": "0.17.0",
-  "apkUrl": "https://github.com/SaifSirhan/Musicapp/releases/download/v0.17.0/app-release.apk",
-  "sha256": "372f471716b65ad9ccb68249e8eea6044e8ab11ac525d1127f52e359941813ca",
-  "notes": "Phase 24: saved/playlist playback now falls back to a local download when YouTube blocks the stream, new Artist page, and consistent song menus across the app. OTA checks use the stable /releases/latest URL."
+  "versionCode": 18,
+  "versionName": "0.17.1",
+  "apkUrl": "https://github.com/SaifSirhan/Musicapp/releases/download/v0.17.1/app-release.apk",
+  "sha256": "52ca85bfc15621fe0f6d7b3a461f4d93d8c5a088aac2248b1da56a88708f22ba",
+  "notes": "Phase 24b hotfix: in-app updates no longer crash at 99%. The APK is now shared through a valid FileProvider root, the installer handover is wrapped in error reporting, downloads are verified and finalized atomically, and SHA-256 is computed while streaming. Note: users still on 0.17.0 must install this release once manually; OTA works from 0.17.1 onward."
 }

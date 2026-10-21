@@ -1680,7 +1680,12 @@ fun PlayerScreen(
                 innerTubeFailCount = innerTubeFailCount,
                 onCheckForUpdates = { scope.launch { updateRepo.check() } },
                 onDownloadUpdate = { info -> scope.launch { updateRepo.download(info) } },
-                onInstallUpdate = { file -> installUpdate(context, file) },
+                onInstallUpdate = { file ->
+                    val error = installUpdate(context, file)
+                    if (error != null) {
+                        scope.launch { snackbarHostState.showSnackbar(error) }
+                    }
+                },
                 onImportAccount = {
                     showSettings = false
                     showImportAccount = true
@@ -2658,15 +2663,55 @@ fun PlayerScreen(
     }
 }
 
-fun installUpdate(context: Context, file: File) {
-    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-    val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, "application/vnd.android.package-archive")
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+/**
+ * Hands the downloaded APK to the system package installer.
+ * Returns null on success, or a user-facing error message on failure.
+ */
+fun installUpdate(context: Context, file: File): String? {
+    return try {
+        if (!file.exists() || file.length() == 0L) {
+            return "Update file is missing. Please download it again."
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !context.packageManager.canRequestPackageInstalls()
+        ) {
+            return try {
+                context.startActivity(
+                    Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                        .setData(android.net.Uri.parse("package:${context.packageName}"))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                "Allow \"Install unknown apps\" for MusicApp, then tap Install update again."
+            } catch (e: Exception) {
+                Log.w(OTA_TAG, "could not open unknown-sources settings", e)
+                "Allow installation from unknown sources in system settings, then try again."
+            }
+        }
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            clipData = android.content.ClipData.newRawUri("update", uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        // Some installers rely on the explicit grant rather than the intent flag.
+        context.packageManager.queryIntentActivities(intent, 0).forEach { resolved ->
+            runCatching {
+                context.grantUriPermission(
+                    resolved.activityInfo.packageName,
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+        }
+        context.startActivity(intent)
+        null
+    } catch (e: Exception) {
+        Log.w(OTA_TAG, "failed to launch installer", e)
+        "Failed to launch installer: ${e.message ?: e.javaClass.simpleName}"
     }
-    context.startActivity(intent)
 }
+
+private const val OTA_TAG = "OTA"
 
 @Preview(showBackground = true)
 @Composable
