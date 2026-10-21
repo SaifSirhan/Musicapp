@@ -72,19 +72,43 @@ fun GoogleSignInButton(
                     val rawNonce = generateNonce()
                     val hashedNonce = sha256(rawNonce)
 
-                    val option = GetGoogleIdOption.Builder()
-                        .setServerClientId(BuildConfig.GOOGLE_WEB_CLIENT_ID)
-                        .setNonce(hashedNonce)
-                        .setFilterByAuthorizedAccounts(false)
-                        .setAutoSelectEnabled(false)
-                        .build()
+                    // 1. Silent path for returning users: only accounts that
+                    // already authorized this app, and no picker if there is
+                    // exactly one. This is the common, frictionless case.
+                    val credential = try {
+                        credentialManager.getCredential(
+                            context,
+                            idTokenRequest(hashedNonce, filterByAuthorizedAccounts = true)
+                        ).credential
+                    } catch (e: NoCredentialException) {
+                        // 2. Nothing authorized yet (new user, revoked grant,
+                        // or a device/model whose Credential Manager filters
+                        // them out — seen on some Honor builds). Retry with
+                        // every Google account on the device, which forces the
+                        // account picker.
+                        android.util.Log.w(
+                            "GSI",
+                            "silent sign-in had no credential (${e.message}); showing all accounts"
+                        )
+                        e.cause?.let { android.util.Log.w("GSI", "  caused by ${it.javaClass.name}: ${it.message}", it) }
+                        try {
+                            credentialManager.getCredential(
+                                context,
+                                idTokenRequest(hashedNonce, filterByAuthorizedAccounts = false)
+                            ).credential
+                        } catch (retry: NoCredentialException) {
+                            // 3. Still nothing: Credential Manager sees no Google
+                            // account at all. Use the legacy Google Sign-In flow.
+                            android.util.Log.e("GSI", "no Google accounts visible to Credential Manager", retry)
+                            retry.cause?.let {
+                                android.util.Log.e("GSI", "  caused by ${it.javaClass.name}: ${it.message}", it)
+                            }
+                            runCatching { legacyLauncher.launch(legacyClient.signInIntent) }
+                                .onFailure { onError("Legacy sign-in could not start: ${it.message}") }
+                            return@launch
+                        }
+                    }
 
-                    val request = GetCredentialRequest.Builder()
-                        .addCredentialOption(option)
-                        .build()
-
-                    val result = credentialManager.getCredential(context, request)
-                    val credential = result.credential
                     if (credential is CustomCredential &&
                         credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
                     ) {
@@ -93,14 +117,9 @@ fun GoogleSignInButton(
                     } else {
                         onError("Unexpected credential type returned.")
                     }
-                } catch (e: NoCredentialException) {
-                    // Credential Manager can't see a Google account on this device (common on
-                    // some Honor/Huawei builds). Fall back to the legacy Google Sign-In flow.
-                    android.util.Log.e("GSI", "NoCredentialException: ${e.message} — falling back to legacy Google Sign-In", e)
-                    e.cause?.let { android.util.Log.e("GSI", "caused by ${it.javaClass.name}: ${it.message}", it) }
-                    runCatching { legacyLauncher.launch(legacyClient.signInIntent) }
-                        .onFailure { onError("Legacy sign-in could not start: ${it.message}") }
                 } catch (e: GetCredentialException) {
+                    // NoCredentialException is already handled by the silent
+                    // attempt and its unfiltered retry above.
                     android.util.Log.e("GSI", "${e.javaClass.simpleName}: ${e.message}", e)
                     e.cause?.let { android.util.Log.e("GSI", "caused by ${it.javaClass.name}: ${it.message}", it) }
                     onError("${e.javaClass.simpleName}: ${e.message ?: "no message"}")
@@ -114,6 +133,22 @@ fun GoogleSignInButton(
     ) {
         Text("Sign in with Google")
     }
+}
+
+private fun idTokenRequest(
+    hashedNonce: String,
+    filterByAuthorizedAccounts: Boolean
+): GetCredentialRequest {
+    val option = GetGoogleIdOption.Builder()
+        .setServerClientId(BuildConfig.GOOGLE_WEB_CLIENT_ID)
+        .setNonce(hashedNonce)
+        .setFilterByAuthorizedAccounts(filterByAuthorizedAccounts)
+        // Auto-select defeats the point of the unfiltered picker.
+        .setAutoSelectEnabled(false)
+        .build()
+    return GetCredentialRequest.Builder()
+        .addCredentialOption(option)
+        .build()
 }
 
 private fun generateNonce(): String {
