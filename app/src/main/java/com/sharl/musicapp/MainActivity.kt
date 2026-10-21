@@ -78,6 +78,7 @@ import com.sharl.musicapp.data.LocalMedia
 import com.sharl.musicapp.data.LocalMediaRepository
 import com.sharl.musicapp.data.MixRepository
 import com.sharl.musicapp.data.ResolutionStats
+import com.sharl.musicapp.data.StreamingBlockedException
 import com.sharl.musicapp.data.NewDropsRepository
 import com.sharl.musicapp.data.NowPlaying
 import com.sharl.musicapp.data.PlaybackCache
@@ -703,7 +704,9 @@ fun PlayerScreen(
         try {
             val result = extractMutex.withLock {
                 resolveRemote(videoId, fallbackTitle)
-            } ?: throw java.io.IOException("No stream URL for $videoId")
+            } ?: throw StreamingBlockedException().also {
+                Log.e("RESOLVE", "both InnerTube and yt-dlp failed for $videoId")
+            }
             val (u, m) = result
             PlaybackCache.put(videoId, u, m.title, m.artist, m.album, m.thumbnailUrl)
             urlCache[videoId] = result
@@ -934,7 +937,11 @@ fun PlayerScreen(
                 Log.e("YTDL", "Failed: $msg")
                 status = "Error: $msg"
                 snackbarHostState.showSnackbar(
-                    "Couldn't play this track. Check your connection and try again."
+                    if (e is StreamingBlockedException) {
+                        e.message ?: "Streaming failed: YouTube API blocked."
+                    } else {
+                        "Couldn't play this track. Check your connection and try again."
+                    }
                 )
             }
         }
@@ -1368,20 +1375,6 @@ fun PlayerScreen(
                 queueIndex = queueIndex,
                 queueTabLabel = activeMixTitle?.let { "Mix: $it" } ?: "Queue",
                 onQueueItemClick = { idx -> playFromQueue(queue, idx) },
-                onStartMix = {
-                    queue.getOrNull(queueIndex)?.let { q ->
-                        startMix(
-                            Song(
-                                videoId = q.videoId,
-                                title = q.title,
-                                artist = nowPlayingArtist ?: "",
-                                thumbnailUrl = nowPlayingThumbnail,
-                                lastPlayedAt = 0L,
-                                playCount = 0
-                            )
-                        )
-                    }
-                },
                 onBack = { showNowPlaying = false },
                 onPlayPause = {
                     val c = controller ?: return@NowPlayingScreen
@@ -1404,6 +1397,8 @@ fun PlayerScreen(
                         c.seekTo(c.currentPosition + skipSecondsState * 1000L)
                     }
                 },
+                onSkipPrevious = { playPrev() },
+                onSkipNext = { playNext() },
                 playbackSpeed = playbackSpeedState,
                 onPlaybackSpeedChange = { v ->
                     playbackSpeedState = v

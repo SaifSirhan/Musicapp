@@ -22,14 +22,20 @@ class MixRepository(context: Context) {
         // lyric versions), so dedupe on the title as well as the video id.
         val seenTitles = hashSetOf(titleKey(seed))
         val pool = (related + diversity).filter {
-            it.videoId !in hidden && seen.add(it.videoId) && seenTitles.add(titleKey(it))
+            // Junk titles are also dropped here so library-sourced diversity
+            // tracks ("… (Lyrics)") can't slip into an otherwise clean mix.
+            it.videoId !in hidden && !isJunk(it.title) &&
+                seen.add(it.videoId) && seenTitles.add(titleKey(it))
         }
 
         // Phase 22: one in five mixes gets a short album run, kept contiguous
         // and in album order instead of being shuffled with the rest.
         val albumBlock = buildAlbumBlock(seed, related + diversity, hidden)
             .filter { seen.add(it.videoId) && seenTitles.add(titleKey(it)) }
-        val shuffled = pool.shuffled()
+        // Phase 23: shuffle first, then stable-sort so official audio and the
+        // seed artist's own uploads lead the station without making the rest
+        // deterministic.
+        val shuffled = pool.shuffled().sortedByDescending { qualityScore(it, seed.artist) }
         val insertAt = if (albumBlock.isEmpty() || shuffled.isEmpty()) shuffled.size
             else shuffled.indices.random()
         val mix = listOf(seed) + shuffled.take(insertAt) + albumBlock + shuffled.drop(insertAt)
@@ -52,7 +58,7 @@ class MixRepository(context: Context) {
             ?: runCatching { dao.randomAlbum() }.getOrNull()
             ?: return emptyList()
         val tracks = dao.songsByAlbum(album, 4)
-            .filter { it.videoId !in hidden && it.videoId != seed.videoId }
+            .filter { it.videoId !in hidden && it.videoId != seed.videoId && !isJunk(it.title) }
         if (tracks.size < 3) return emptyList()
         Log.d("MIX", "album block: $album -> ${tracks.map { it.title }}")
         return tracks
@@ -84,7 +90,9 @@ class MixRepository(context: Context) {
     }
 
     private fun addRelated(out: MutableMap<String, Song>, r: RelatedVideo, seed: Song) {
-        if (r.videoId.isBlank() || r.videoId == seed.videoId || isJunk(r.title)) return
+        if (r.videoId.isBlank() || r.videoId == seed.videoId) return
+        // Duration + title sanity: >15min, <30s, lyrics/live/mixes/podcasts...
+        if (InnerTubeHelper.isJunkTrack(r.title, r.durationMs) || isJunk(r.title)) return
         if (out.size >= RELATED_TARGET) return
         out.putIfAbsent(
             r.videoId,
@@ -118,8 +126,20 @@ class MixRepository(context: Context) {
         return title.substring(0, idx).trim().takeIf { it.isNotEmpty() }
     }
 
-    private fun isJunk(title: String): Boolean =
-        JUNK.any { title.contains(it, ignoreCase = true) }
+    private fun isJunk(title: String): Boolean = JUNK.containsMatchIn(title)
+
+    // Higher score sorts earlier. Official audio first, then any "audio" upload,
+    // then the seed artist's own channel / auto-generated "- Topic" channels.
+    private fun qualityScore(song: Song, seedArtist: String): Int {
+        val title = song.title.lowercase()
+        val artist = song.artist.lowercase()
+        var score = 0
+        if (OFFICIAL_AUDIO.containsMatchIn(title)) score += 5
+        else if (AUDIO.containsMatchIn(title)) score += 3
+        if (artist.endsWith(" - topic")) score += 3
+        if (seedArtist.isNotBlank() && artist.contains(seedArtist.lowercase())) score += 2
+        return score
+    }
 
     // Drops "(Official Video)", "[Lyrics]" and the artist name so different
     // uploads of the same recording collapse onto one key.
@@ -136,12 +156,15 @@ class MixRepository(context: Context) {
         const val DIVERSITY_TARGET = 30
         val BRACKETS = Regex("\\([^)]*\\)|\\[[^\\]]*\\]|\\{[^}]*\\}")
         val NON_ALNUM = Regex("[^a-z0-9]+")
-        val JUNK = listOf(
-            "mix", "playlist", "full album", "1 hour", "10 hours",
-            "compilation", "livestream", "live stream", "full performance",
-            "best of", "best songs", "greatest hits", "top songs",
-            "interview", "audition", "reaction", "behind the scenes",
-            "podcast", "trailer", "vlog", "prank", "x factor", "got talent"
+        // Phase 23 junk list. Word boundaries keep "Remix" and "Deliver" safe.
+        val JUNK = Regex(
+            "\\b(lyrics?|live|mix|hours?|compilations?|reactions?|tutorials?|podcasts?|" +
+                "playlist|full album|livestream|live stream|full performance|audition|" +
+                "best of|best songs|greatest hits|top songs|interview|behind the scenes|" +
+                "trailer|vlog|prank|x factor|got talent)\\b",
+            RegexOption.IGNORE_CASE
         )
+        val OFFICIAL_AUDIO = Regex("\\bofficial audio\\b", RegexOption.IGNORE_CASE)
+        val AUDIO = Regex("\\baudio\\b", RegexOption.IGNORE_CASE)
     }
 }

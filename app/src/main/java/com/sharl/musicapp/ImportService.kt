@@ -2,11 +2,13 @@ package com.sharl.musicapp
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.sharl.musicapp.data.ImportPreview
@@ -35,6 +37,11 @@ class ImportService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var work: Job? = null
 
+    // Set by ACTION_CANCEL. Guards late progress/notification writes while the
+    // blocking yt-dlp call in the cancelled coroutine finishes.
+    @Volatile
+    private var cancelled = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -43,6 +50,19 @@ class ImportService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Phase 23: cancellation arrives either from the notification action or
+        // the Import screen. Drop the running job and reset shared state.
+        if (intent?.action == ACTION_CANCEL) {
+            Log.d("IMPORT", "cancel requested")
+            cancelled = true
+            ImportManager.reset()
+            work?.cancel()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        cancelled = false
+        ImportManager.begin()
         val payload = intent?.getStringExtra(EXTRA_JOBS)
         if (intent?.action != ACTION_START || payload.isNullOrBlank()) {
             stopSelf(startId)
@@ -86,6 +106,7 @@ class ImportService : Service() {
         postNotification("Preparing import…", 0, total)
 
         for (job in parsed) {
+            if (cancelled) return
             val name = job.optString("name", "Imported").ifBlank { "Imported" }
             val queries = job.optJSONArray("queries")
             val tracksJson = job.optJSONArray("tracks")
@@ -120,6 +141,7 @@ class ImportService : Service() {
                 }
             }
 
+            if (cancelled) return
             ImportRepository(this).commit(preview, downloadForOffline = false)
             imported += preview.tracks.size
             skipped += preview.unresolved.size
@@ -175,7 +197,22 @@ class ImportService : Service() {
                 current.coerceIn(0, total.coerceAtLeast(0)),
                 false
             )
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "Cancel Import",
+                cancelPendingIntent()
+            )
             .build()
+
+    private fun cancelPendingIntent(): PendingIntent {
+        val intent = Intent(this, ImportService::class.java).setAction(ACTION_CANCEL)
+        return PendingIntent.getService(
+            this,
+            CANCEL_REQUEST_CODE,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
 
     private fun postNotification(
         text: String,
@@ -183,6 +220,7 @@ class ImportService : Service() {
         total: Int,
         ongoing: Boolean = true
     ) {
+        if (cancelled) return
         if (ongoing) {
             runCatching {
                 getSystemService(NotificationManager::class.java)
@@ -203,9 +241,11 @@ class ImportService : Service() {
 
     companion object {
         const val ACTION_START = "com.sharl.musicapp.action.START_ACCOUNT_IMPORT"
+        const val ACTION_CANCEL = "com.sharl.musicapp.action.CANCEL_ACCOUNT_IMPORT"
         const val EXTRA_JOBS = "jobs"
         private const val CHANNEL_ID = "library_import"
         private const val NOTIFICATION_ID = 4201
+        private const val CANCEL_REQUEST_CODE = 4202
 
         fun start(context: Context, jobs: JSONArray) {
             val intent = Intent(context, ImportService::class.java).apply {
@@ -213,6 +253,16 @@ class ImportService : Service() {
                 putExtra(EXTRA_JOBS, jobs.toString())
             }
             androidx.core.content.ContextCompat.startForegroundService(context, intent)
+        }
+
+        // Delivered to the already-running service; stopSelf + onDestroy drop
+        // the coroutine scope. ImportManager is reset immediately in
+        // onStartCommand so the UI leaves the Running state at once.
+        fun cancel(context: Context) {
+            val intent = Intent(context, ImportService::class.java)
+                .setAction(ACTION_CANCEL)
+            runCatching { context.startService(intent) }
+                .onFailure { Log.e("IMPORT", "cancel dispatch failed: ${it.message}") }
         }
     }
 }

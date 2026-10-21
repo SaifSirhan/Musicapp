@@ -111,8 +111,10 @@ object SpotifyImporter {
     }
 
     fun disconnect(context: Context) {
+        // Drops access_token, refresh_token, expiry and the OAuth state in one go.
         prefs(context).edit().clear().apply()
         _connected.value = false
+        _error.value = null
     }
 
     suspend fun fetchPlaylists(context: Context): List<Playlist> =

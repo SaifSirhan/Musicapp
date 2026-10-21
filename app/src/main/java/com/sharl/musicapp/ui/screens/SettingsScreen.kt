@@ -243,7 +243,7 @@ fun SettingsScreen(
             }
         }
         Spacer(Modifier.height(12.dp))
-        OutlinedButton(onClick = onImportAccount) { Text("Import from Spotify") }
+        OutlinedButton(onClick = onImportAccount) { Text("Import Account") }
         HorizontalDivider()
 
         // Playback — Phase 22: skip duration, speed, crossfade and loudness.

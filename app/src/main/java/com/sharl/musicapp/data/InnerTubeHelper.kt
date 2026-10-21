@@ -14,8 +14,14 @@ data class RelatedVideo(
     val artist: String,
     val thumbnailUrl: String?,
     // Only some search layouts expose this; null means "unknown".
-    val subscribers: Long? = null
+    val subscribers: Long? = null,
+    // Parsed from lengthText / thumbnail duration badge; null means "unknown".
+    val durationMs: Long? = null
 )
+
+/** Both resolvers failed: surfaced verbatim so the Snackbar names the cause. */
+class StreamingBlockedException :
+    java.io.IOException("Streaming failed: YouTube API blocked.")
 
 object InnerTubeHelper {
     // NOTE TO DEV: These constants are what YouTube changes. If InnerTube starts failing,
@@ -31,9 +37,65 @@ object InnerTubeHelper {
     private const val IOS_USER_AGENT =
         "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
 
+    // YouTube now expects a visitor id on player requests; without one some
+    // clients answer LOGIN_REQUIRED ("confirm you're not a bot"). Fetched once
+    // from the visitor_id endpoint and reused for every player call.
+    @Volatile
+    private var visitorData: String? = null
+
     suspend fun getStreamUrl(videoId: String): String? = withContext(Dispatchers.IO) {
-        fetchBestAudioUrl(videoId, "ANDROID_VR", CLIENT_VERSION, USER_AGENT)
-            ?: fetchBestAudioUrl(videoId, "IOS", IOS_CLIENT_VERSION, IOS_USER_AGENT)
+        val started = System.currentTimeMillis()
+        ensureVisitorData()
+        val url = fetchBestAudioUrl(videoId, "IOS", IOS_CLIENT_VERSION, IOS_USER_AGENT)
+            ?: fetchBestAudioUrl(videoId, "ANDROID_VR", CLIENT_VERSION, USER_AGENT)
+        Log.d(
+            "InnerTube",
+            "getStreamUrl($videoId) -> ${if (url != null) "ok" else "failed"} " +
+                "in ${System.currentTimeMillis() - started}ms"
+        )
+        url
+    }
+
+    private fun ensureVisitorData(): String? {
+        visitorData?.let { return it }
+        synchronized(this) {
+            visitorData?.let { return it }
+            try {
+                val conn = (URL("https://www.youtube.com/youtubei/v1/visitor_id?key=$API_KEY")
+                    .openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("User-Agent", IOS_USER_AGENT)
+                    connectTimeout = 5000
+                    readTimeout = 5000
+                    doOutput = true
+                }
+                val body = JSONObject()
+                    .put(
+                        "context",
+                        JSONObject().put(
+                            "client",
+                            JSONObject()
+                                .put("clientName", "IOS")
+                                .put("clientVersion", IOS_CLIENT_VERSION)
+                        )
+                    )
+                    .toString()
+                conn.outputStream.write(body.toByteArray())
+                if (conn.responseCode == 200) {
+                    val json = JSONObject(conn.inputStream.bufferedReader().readText())
+                    visitorData = json.optJSONObject("responseContext")
+                        ?.optString("visitorData")
+                        ?.takeIf { it.isNotBlank() }
+                    Log.d("InnerTube", "visitorData ${if (visitorData != null) "acquired" else "missing"}")
+                } else {
+                    Log.w("InnerTube", "visitor_id HTTP ${conn.responseCode}")
+                }
+            } catch (e: Exception) {
+                Log.w("InnerTube", "visitor_id failed: ${e.message}")
+            }
+            return visitorData
+        }
     }
 
     private fun fetchBestAudioUrl(
@@ -51,54 +113,108 @@ object InnerTubeHelper {
             conn.connectTimeout = 5000
             conn.readTimeout = 5000
 
-            val jsonBody = """
-                {
-                  "context": {
-                    "client": {
-                      "clientName": "$clientName",
-                      "clientVersion": "$clientVersion",
-                      "androidSdkVersion": 32,
-                      "osName": "Android",
-                      "osVersion": "12"
-                    }
-                  },
-                  "videoId": "$videoId",
-                  "playbackContext": {
-                    "contentPlaybackContext": { "html5Preference": "HTML5_PREF_WANTS" }
-                  }
+            val client = JSONObject().apply {
+                put("clientName", clientName)
+                put("clientVersion", clientVersion)
+                if (clientName == "IOS") {
+                    put("deviceMake", "Apple")
+                    put("deviceModel", "iPhone16,2")
+                    put("osName", "iPhone")
+                    put("osVersion", "18.3.2.22D82")
+                } else {
+                    put("androidSdkVersion", 32)
+                    put("osName", "Android")
+                    put("osVersion", "12")
                 }
-            """.trimIndent()
+                visitorData?.let { put("visitorData", it) }
+            }
+            val jsonBody = JSONObject()
+                .put("context", JSONObject().put("client", client))
+                .put("videoId", videoId)
+                .put("contentCheckOk", true)
+                .put("racyCheckOk", true)
+                .put(
+                    "playbackContext",
+                    JSONObject().put(
+                        "contentPlaybackContext",
+                        JSONObject().put("html5Preference", "HTML5_PREF_WANTS")
+                    )
+                )
+                .toString()
 
             conn.doOutput = true
             conn.outputStream.write(jsonBody.toByteArray())
 
-            if (conn.responseCode == 200) {
-                val response = conn.inputStream.bufferedReader().readText()
-                val json = JSONObject(response)
-                val streamingData = json.optJSONObject("streamingData") ?: return null
-                val formats = streamingData.optJSONArray("adaptiveFormats") ?: return null
-
-                // Find highest bitrate audio (m4a/webm)
-                var bestUrl: String? = null
-                var maxBitrate = 0
-                for (i in 0 until formats.length()) {
-                    val format = formats.getJSONObject(i)
-                    val mime = format.optString("mimeType", "")
-                    if (mime.contains("audio")) {
-                        val bitrate = format.optInt("bitrate", 0)
-                        val url = format.optString("url", "")
-                        if (url.isNotEmpty() && bitrate > maxBitrate) {
-                            maxBitrate = bitrate
-                            bestUrl = url
-                        }
-                    }
-                }
-                return bestUrl
+            if (conn.responseCode != 200) {
+                Log.e("InnerTube", "$clientName HTTP ${conn.responseCode} for $videoId")
+                return null
             }
+            val response = conn.inputStream.bufferedReader().readText()
+            val json = JSONObject(response)
+            json.optJSONObject("responseContext")
+                ?.optString("visitorData")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { visitorData = it }
+
+            val playability = json.optJSONObject("playabilityStatus")
+            val status = playability?.optString("status").orEmpty()
+            if (status.isNotEmpty() && status != "OK") {
+                Log.w(
+                    "InnerTube",
+                    "$clientName playability=$status reason=${playability?.optString("reason")} ($videoId)"
+                )
+            }
+            val streamingData = json.optJSONObject("streamingData")
+            val formats = streamingData?.optJSONArray("adaptiveFormats")
+            if (formats == null) {
+                Log.e(
+                    "InnerTube",
+                    "$clientName returned no adaptiveFormats (status=${status.ifBlank { "?" }}) for $videoId"
+                )
+                return null
+            }
+
+            // Find highest bitrate audio (m4a/webm), accepting both direct URLs
+            // and signatureCipher entries (some clients stopped sending "url").
+            var bestUrl: String? = null
+            var maxBitrate = 0
+            for (i in 0 until formats.length()) {
+                val format = formats.getJSONObject(i)
+                val mime = format.optString("mimeType", "")
+                if (!mime.contains("audio")) continue
+                val bitrate = format.optInt("bitrate", 0)
+                val url = formatUrl(format)
+                if (url.isNotEmpty() && bitrate > maxBitrate) {
+                    maxBitrate = bitrate
+                    bestUrl = url
+                }
+            }
+            if (bestUrl == null) {
+                Log.e("InnerTube", "$clientName had ${formats.length()} formats but no playable audio ($videoId)")
+            }
+            return bestUrl
         } catch (e: Exception) {
             Log.e("InnerTube", "Fast extraction failed ($clientName)", e)
         }
         return null
+    }
+
+    private fun formatUrl(format: JSONObject): String {
+        val direct = format.optString("url", "")
+        if (direct.isNotEmpty()) return direct
+        val cipher = format.optString("signatureCipher", "")
+            .ifBlank { format.optString("cipher", "") }
+        if (cipher.isBlank()) return ""
+        return try {
+            val params = android.net.Uri.parse("https://x/?$cipher")
+            val base = params.getQueryParameter("url") ?: return ""
+            val signature = params.getQueryParameter("s") ?: return ""
+            val key = params.getQueryParameter("sp") ?: "signature"
+            val separator = if (base.contains("?")) "&" else "?"
+            "$base$separator$key=$signature"
+        } catch (e: Exception) {
+            ""
+        }
     }
 
     // Related videos for the Mix engine. The WEB client answers with the modern
@@ -113,8 +229,63 @@ object InnerTubeHelper {
             fetchNext(videoId, VR_CONTEXT, USER_AGENT)?.let { json ->
                 parseVrRelated(json).forEach { out.putIfAbsent(it.videoId, it) }
             }
-            out.values.toList()
+            // Phase 23: mixes must stay single-song sized. Known durations
+            // outside 30s..15min and junk titles are dropped here so every
+            // consumer (Mix, Discover) gets a clean list.
+            out.values.filter { !isJunkTrack(it.title, it.durationMs) }
         }
+
+    // ---- Track sanity filter -------------------------------------------------
+
+    const val MIN_TRACK_MS = 30_000L
+    const val MAX_TRACK_MS = 15L * 60 * 1000
+
+    // Word-boundary matching so "Remix", "Deliver" or "Living" don't trip the
+    // "mix"/"live" filters while "Nightcore Mix", "Live at …" and "1 hour" do.
+    private val JUNK_TITLE = Regex(
+        "\\b(lyrics?|live|mix|hours?|compilations?|reactions?|tutorials?|podcasts?|" +
+            "playlist|full album|livestream|interview|audition|best of|best songs|" +
+            "greatest hits|top songs|behind the scenes|trailer|vlog|prank|x factor|got talent)\\b",
+        RegexOption.IGNORE_CASE
+    )
+
+    fun isJunkTrack(title: String, durationMs: Long?): Boolean {
+        if (durationMs != null && durationMs !in MIN_TRACK_MS..MAX_TRACK_MS) return true
+        return JUNK_TITLE.containsMatchIn(title)
+    }
+
+    // "4:25" / "1:02:33" -> milliseconds; null when the text isn't a timestamp.
+    fun parseDurationMs(text: String): Long? {
+        val parts = text.trim().split(":")
+        if (parts.size !in 2..3) return null
+        val nums = parts.map { it.trim().toLongOrNull() ?: return null }
+        val seconds = when (nums.size) {
+            2 -> nums[0] * 60 + nums[1]
+            else -> nums[0] * 3600 + nums[1] * 60 + nums[2]
+        }
+        return seconds * 1000L
+    }
+
+    // WEB lockups carry the duration in a thumbnail badge ("44:08").
+    private fun lockupDurationMs(lockup: JSONObject): Long? {
+        val overlays = lockup.optJSONObject("contentImage")
+            ?.optJSONObject("thumbnailViewModel")
+            ?.optJSONArray("overlays") ?: return null
+        for (i in 0 until overlays.length()) {
+            val overlay = overlays.optJSONObject(i) ?: continue
+            val keys = overlay.keys()
+            while (keys.hasNext()) {
+                val renderer = overlay.optJSONObject(keys.next()) ?: continue
+                val badges = renderer.optJSONArray("badges") ?: continue
+                for (b in 0 until badges.length()) {
+                    val badge = badges.optJSONObject(b)
+                        ?.optJSONObject("thumbnailBadgeViewModel") ?: continue
+                    parseDurationMs(badge.optString("text"))?.let { return it }
+                }
+            }
+        }
+        return null
+    }
 
     private val WEB_CONTEXT =
         "\"clientName\":\"WEB\",\"clientVersion\":\"2.20250101.00.00\""
@@ -170,7 +341,10 @@ object InnerTubeHelper {
                 ?.optJSONObject("image")
                 ?.optJSONArray("sources")
                 ?.optJSONObject(0)?.optString("url")
-            list += RelatedVideo(id, title, artist, thumb?.takeIf { it.isNotBlank() })
+            list += RelatedVideo(
+                id, title, artist, thumb?.takeIf { it.isNotBlank() },
+                durationMs = lockupDurationMs(lockup)
+            )
         }
         return list
     }
@@ -210,7 +384,10 @@ object InnerTubeHelper {
             val thumbs = r.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
             val thumb = thumbs?.optJSONObject((thumbs.length() - 1).coerceAtLeast(0))
                 ?.optString("url")
-            out += RelatedVideo(id, title, artist, thumb?.takeIf { it.isNotBlank() })
+            out += RelatedVideo(
+                id, title, artist, thumb?.takeIf { it.isNotBlank() },
+                durationMs = parseDurationMs(runsText(r.optJSONObject("lengthText")))
+            )
         }
     }
 
@@ -261,7 +438,13 @@ object InnerTubeHelper {
                                     ?.optString("url")
                                 out.putIfAbsent(
                                     id,
-                                    RelatedVideo(id, title, artist, thumb, subscriberCount(r))
+                                    RelatedVideo(
+                                        id, title, artist, thumb,
+                                        subscribers = subscriberCount(r),
+                                        durationMs = parseDurationMs(
+                                            runsText(r.optJSONObject("lengthText"))
+                                        )
+                                    )
                                 )
                             }
                         }
@@ -283,7 +466,13 @@ object InnerTubeHelper {
                                 ?.optJSONArray("sources")
                                 ?.optJSONObject(0)?.optString("url")
                             if (out.size < limit) {
-                                out.putIfAbsent(id, RelatedVideo(id, title, artist, thumb))
+                                out.putIfAbsent(
+                                    id,
+                                    RelatedVideo(
+                                        id, title, artist, thumb,
+                                        durationMs = lockupDurationMs(r)
+                                    )
+                                )
                             }
                         }
                     }
@@ -291,7 +480,7 @@ object InnerTubeHelper {
             } catch (e: Exception) {
                 Log.e("InnerTube", "search failed", e)
             }
-            out.values.toList()
+            out.values.filter { !isJunkTrack(it.title, it.durationMs) }
         }
 
     // Discover Underground: a handful of genre searches, dropping channels that

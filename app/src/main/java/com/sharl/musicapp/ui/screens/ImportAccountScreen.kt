@@ -214,6 +214,7 @@ fun ImportAccountScreen(
                     return@launch
                 }
                 ImportManager.reset()
+                ImportManager.begin()
                 ImportService.start(context, jobs)
             } catch (e: Exception) {
                 status = null
@@ -265,6 +266,17 @@ fun ImportAccountScreen(
                     },
                     modifier = Modifier.fillMaxWidth()
                 )
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = {
+                        ImportService.cancel(context)
+                        ImportManager.reset()
+                        status = null
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Cancel Import")
+                }
                 Spacer(Modifier.height(8.dp))
             }
             is ImportState.Done -> {
@@ -357,10 +369,23 @@ fun ImportAccountScreen(
                 Text("Connect YouTube Music")
             }
         } else {
-            Text(
-                "YouTube connected" + (accountEmail?.let { " ($it)" } ?: ""),
-                style = MaterialTheme.typography.bodyMedium
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "YouTube connected" + (accountEmail?.let { " ($it)" } ?: ""),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = {
+                    settings.clearGoogleAccessToken()
+                    ytmToken = null
+                    ytmPlaylists = emptyList()
+                    selected.keys.filter { it.startsWith("ytm:") }
+                        .forEach { selected.remove(it) }
+                }) { Text("Disconnect") }
+            }
             if (ytmLoading) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(modifier = Modifier.size(16.dp))

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -83,12 +84,13 @@ fun NowPlayingScreen(
     queueIndex: Int,
     queueTabLabel: String = "Queue",
     onQueueItemClick: (Int) -> Unit,
-    onStartMix: () -> Unit,
     onBack: () -> Unit,
     onPlayPause: () -> Unit,
     skipSeconds: Int = 15,
     onSkipBack: () -> Unit = {},
     onSkipForward: () -> Unit = {},
+    onSkipPrevious: () -> Unit = {},
+    onSkipNext: () -> Unit = {},
     playbackSpeed: Float = 1f,
     onPlaybackSpeedChange: (Float) -> Unit = {},
     onNotInterested: () -> Unit = {},
@@ -99,7 +101,7 @@ fun NowPlayingScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .padding(24.dp)
+            .padding(horizontal = 16.dp, vertical = 24.dp)
     ) {
         // Top bar: back on the left, "not interested" on the right so the
         // current track can be hidden without opening its menu.
@@ -200,43 +202,26 @@ fun NowPlayingScreen(
                 }
                 Spacer(modifier = Modifier.size(16.dp))
 
-                // Title and artist, centered; the speed chip sits at the end
-                // and opens the quick speed slider.
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Spacer(Modifier.size(48.dp))
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.headlineMedium,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clickable {
-                                speedDraft = playbackSpeed
-                                showSpeedDialog = true
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            String.format(java.util.Locale.US, "%.1fx", playbackSpeed),
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
+                // Title and artist, centered. The speed chip moved next to the
+                // progress times so it no longer squeezes the title.
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.headlineMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp)
+                )
                 Spacer(modifier = Modifier.size(8.dp))
                 Text(
                     text = artist,
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.fillMaxWidth()
                 )
                 if (isLoading && showExtracting) {
@@ -409,12 +394,26 @@ fun NowPlayingScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp)
+                .padding(horizontal = 20.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 formatTime(displayPos),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            // Playback speed chip; tapping it opens the quick speed slider.
+            Text(
+                text = String.format(java.util.Locale.US, "%.1fx", playbackSpeed),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clickable {
+                        speedDraft = playbackSpeed
+                        showSpeedDialog = true
+                    }
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
             )
             Spacer(modifier = Modifier.weight(1f))
             Text(
@@ -424,107 +423,94 @@ fun NowPlayingScreen(
             )
         }
 
-        // Shuffle, transport and repeat in one row: the artwork above is
-        // flexible, so these controls always stay on screen.
+        // Shuffle | Previous | −15s | Play | +15s | Next | Repeat. Every cell
+        // shares the row width through weights, so seven controls fit even on
+        // narrow phones without clipping.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
+                .padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier.size(48.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                IconButton(onClick = onStartMix) {
-                    Text(
-                        "📻",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+            TransportSlot(Modifier.weight(1f), onClick = onShuffleToggle) {
+                Text(
+                    "🔀",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = if (isShuffled)
+                        MaterialTheme.colorScheme.primary
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            TransportSlot(Modifier.weight(1f), onClick = onSkipPrevious) {
+                Text(
+                    "⏮",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            TransportSlot(Modifier.weight(1f), onClick = onSkipBack) {
+                Text(
+                    "−${skipSeconds}s",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
             }
             Box(
-                modifier = Modifier.size(48.dp),
+                modifier = Modifier.weight(1.25f),
                 contentAlignment = Alignment.Center
             ) {
-                IconButton(onClick = onShuffleToggle) {
-                    Text(
-                        "🔀",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = if (isShuffled)
-                            MaterialTheme.colorScheme.primary
-                        else
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            Box(
-                modifier = Modifier.size(48.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                IconButton(onClick = onSkipBack) {
-                    Text(
-                        "−${skipSeconds}s",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-            }
-            Box(
-                modifier = Modifier
-                    .size(64.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary)
-                    .clickable(enabled = !isLoading) { onPlayPause() },
-                contentAlignment = Alignment.Center
-            ) {
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(32.dp),
-                        strokeWidth = 3.dp,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
-                } else {
-                    TransportIcon(
-                        kind = if (isPlaying) TransportKind.Pause else TransportKind.Play,
-                        size = 32.dp,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
-                }
-            }
-            Box(
-                modifier = Modifier.size(48.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                IconButton(onClick = onSkipForward) {
-                    Text(
-                        "+${skipSeconds}s",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-            }
-            Box(
-                modifier = Modifier.size(48.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                IconButton(onClick = onRepeatToggle) {
-                    val glyph = when (repeatMode) {
-                        1 -> "🔁"
-                        2 -> "🔂"
-                        else -> "🔁"
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary)
+                        .clickable(enabled = !isLoading) { onPlayPause() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(26.dp),
+                            strokeWidth = 3.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    } else {
+                        TransportIcon(
+                            kind = if (isPlaying) TransportKind.Pause else TransportKind.Play,
+                            size = 26.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
                     }
-                    Text(
-                        glyph,
-                        style = MaterialTheme.typography.titleLarge,
-                        color = if (repeatMode == 0)
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        else
-                            MaterialTheme.colorScheme.primary
-                    )
                 }
+            }
+            TransportSlot(Modifier.weight(1f), onClick = onSkipForward) {
+                Text(
+                    "+${skipSeconds}s",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            TransportSlot(Modifier.weight(1f), onClick = onSkipNext) {
+                Text(
+                    "⏭",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            TransportSlot(Modifier.weight(1f), onClick = onRepeatToggle) {
+                val glyph = when (repeatMode) {
+                    1 -> "🔁"
+                    2 -> "🔂"
+                    else -> "🔁"
+                }
+                Text(
+                    glyph,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = if (repeatMode == 0)
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    else
+                        MaterialTheme.colorScheme.primary
+                )
             }
         }
 
@@ -565,6 +551,23 @@ fun NowPlayingScreen(
                 }
             )
         }
+    }
+}
+
+/** One fixed-height, weighted cell in the seven-button transport row. */
+@Composable
+private fun TransportSlot(
+    modifier: Modifier,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .height(48.dp)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        content()
     }
 }
 
