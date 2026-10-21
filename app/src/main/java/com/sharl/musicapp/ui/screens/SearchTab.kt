@@ -50,6 +50,7 @@ fun ColumnScope.SearchTab(
     onPreExtract: suspend (String) -> Unit,
     scope: CoroutineScope,
     onPlayFromQueue: (List<QueueItem>, Int) -> Unit,
+    onStartMix: (Song) -> Unit,
     onToggleFavorite: (Song) -> Unit,
     onSongMenu: (Song) -> Unit,
     downloadIds: List<String>,
@@ -175,16 +176,12 @@ fun ColumnScope.SearchTab(
             items(localMatches, key = { "local:${it.videoId}" }) { song ->
                 SongRow(
                     song = song,
-                    onClick = {
-                        onPlayFromQueue(
-                            localMatches.map { QueueItem(it.videoId, it.title) },
-                            localMatches.indexOf(song)
-                        )
-                    },
+                    onClick = { onStartMix(song) },
                     onToggleFavorite = { onToggleFavorite(song) },
                     onLongClick = { onSongMenu(song) },
                     showDownloaded = downloadIds.contains(song.videoId),
-                    isLoading = song.videoId == loadingVideoId
+                    isLoading = song.videoId == loadingVideoId,
+                    onMenuClick = { onSongMenu(song) }
                 )
             }
             item { HorizontalDivider() }
@@ -197,25 +194,23 @@ fun ColumnScope.SearchTab(
                 )
             }
         }
-        val items = results.map { QueueItem(it.videoId, it.title) }
-        itemsIndexed(results, key = { _, result -> "yt:${result.videoId}" }) { idx, result ->
+        itemsIndexed(results, key = { _, result -> "yt:${result.videoId}" }) { _, result ->
+            val song = Song(
+                videoId = result.videoId,
+                title = result.title,
+                artist = "YouTube",
+                thumbnailUrl = youtubeThumb(result.videoId),
+                lastPlayedAt = 0L,
+                playCount = 0,
+                isFavorite = false,
+                isHidden = false
+            )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .combinedClickable(
-                        onClick = { onPlayFromQueue(items, idx) },
-                        onLongClick = {
-                            onSongMenu(Song(
-                                videoId = result.videoId,
-                                title = result.title,
-                                artist = "YouTube",
-                                thumbnailUrl = youtubeThumb(result.videoId),
-                                lastPlayedAt = 0L,
-                                playCount = 0,
-                                isFavorite = false,
-                                isHidden = false
-                            ))
-                        }
+                        onClick = { onStartMix(song) },
+                        onLongClick = { onSongMenu(song) }
                     )
                     .padding(vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -233,6 +228,10 @@ fun ColumnScope.SearchTab(
                         color = androidx.compose.material3.MaterialTheme.colorScheme.primary
                     )
                     Spacer(Modifier.width(8.dp))
+                } else {
+                    IconButton(onClick = { onSongMenu(song) }) {
+                        Text("⋮", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                    }
                 }
             }
             HorizontalDivider()

@@ -64,6 +64,8 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.sharl.musicapp.data.AppDatabase
@@ -98,8 +100,11 @@ import com.sharl.musicapp.data.UpdateRepository
 import com.sharl.musicapp.data.UpdateState
 import java.io.File
 import com.sharl.musicapp.ui.components.MenuItem
+import com.sharl.musicapp.ui.components.SongActionsSheet
 import com.sharl.musicapp.ui.components.Thumbnail
 import com.sharl.musicapp.ui.components.asSong
+import com.sharl.musicapp.ui.screens.ArtistScreen
+import com.sharl.musicapp.ui.screens.DownloadMenuAction
 import com.sharl.musicapp.ui.screens.ForYouScreen
 import com.sharl.musicapp.ui.screens.HomeTab
 import com.sharl.musicapp.ui.screens.ImportAccountScreen
@@ -236,6 +241,11 @@ fun PlayerScreen(
     // MediaItem window. The player only ever holds a contiguous slice
     // [windowStart .. windowStart + mediaItemCount - 1] of [queue].
     var windowStart by remember { mutableStateOf(0) }
+    // One-shot streaming recovery. YouTube CDN URLs 403 once their signed range
+    // expires; on the first IO error per track we re-download it to the local
+    // playback cache and replay, instead of leaving the UI stuck at 0:00.
+    var recoveringVideoId by remember { mutableStateOf<String?>(null) }
+    val recoveryAttempts = remember { mutableSetOf<String>() }
     var nowPlayingTitle by remember { mutableStateOf<String?>(null) }
     var nowPlayingArtist by remember { mutableStateOf<String?>(null) }
     var nowPlayingThumbnail by remember { mutableStateOf<String?>(null) }
@@ -276,6 +286,8 @@ fun PlayerScreen(
     var showDeletePlaylistConfirm by remember { mutableStateOf(false) }
     var playlistMenuSong by remember { mutableStateOf<PlaylistSong?>(null) }
     var playlistMenuPlaylistId by remember { mutableStateOf<Long?>(null) }
+    // Phase 24: artist page shown over the tabs; null = hidden.
+    var artistScreenName by remember { mutableStateOf<String?>(null) }
 
     val speedDialRepo = remember { SpeedDialRepository(context) }
     val speedDialSlots by speedDialRepo.allSlots().collectAsState(initial = emptyList())
@@ -518,6 +530,9 @@ fun PlayerScreen(
         runCatching { controller?.setPlaybackSpeed(playbackSpeedState) }
     }
 
+    // Self-healing playback is installed after playFromQueue is declared (local
+    // functions are only visible below their definition).
+
     var notifPermissionGranted by remember { mutableStateOf(false) }
 
     val notifLauncher = rememberLauncherForActivityResult(
@@ -684,6 +699,16 @@ fun PlayerScreen(
                 )
             }
         }
+        // Stream URLs are CDN-bound and go stale (403). A full yt-dlp download
+        // in the playback cache is a local file, so prefer it over network.
+        Downloader.cachedStreamFile(context, videoId)?.let { f ->
+            return android.net.Uri.fromFile(f).toString() to SongMetadata(
+                title = fallbackTitle ?: videoId,
+                artist = localArtist,
+                album = null,
+                thumbnailUrl = youtubeThumb(videoId)
+            )
+        }
         // 1. In-memory (this session).
         urlCache[videoId]?.let {
             urlCache.remove(videoId)
@@ -748,6 +773,15 @@ fun PlayerScreen(
                     thumbnailUrl = row.thumbnailUrl
                 )
             }
+        }
+        // Playback-cache downloads are permanent local files too.
+        Downloader.cachedStreamFile(context, videoId)?.let { f ->
+            return android.net.Uri.fromFile(f).toString() to SongMetadata(
+                title = item.title,
+                artist = item.artist,
+                album = null,
+                thumbnailUrl = youtubeThumb(videoId)
+            )
         }
         urlCache[videoId]?.let { return it }
         PlaybackCache.get(videoId)?.let { c ->
@@ -947,6 +981,62 @@ fun PlayerScreen(
         }
     }
 
+    // Self-healing playback. A signed CDN stream URL that returns 403 (or any
+    // other IO failure) triggers exactly one yt-dlp fallback per track: resolve
+    // to a full local download and restart the queue at that index. Previously
+    // the error only surfaced in logcat and the UI sat at 0:00 / 0:00.
+    DisposableEffect(controller) {
+        val c = controller ?: return@DisposableEffect onDispose {}
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                val code = error.errorCode
+                val ioFailure = code == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
+                    code == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
+                    code == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+                    code == PlaybackException.ERROR_CODE_IO_NO_PERMISSION
+                if (!ioFailure || recoveringVideoId != null) return
+                // Prefer the failing MediaItem's queue tag: on a gapless
+                // transition queueIndex may not have caught up yet.
+                val tagged = c.currentMediaItem?.requestMetadata?.extras
+                    ?.getInt("queue_index", -1) ?: -1
+                val idx = if (tagged in queue.indices) tagged else queueIndex
+                val q = queue.getOrNull(idx) ?: return
+                if (q.localUri != null) return
+                val key = "${q.videoId}:$idx"
+                if (!recoveryAttempts.add(key)) {
+                    scope.launch {
+                        snackbarHostState.showSnackbar(
+                            "Streaming failed: YouTube API blocked."
+                        )
+                    }
+                    return
+                }
+                recoveringVideoId = q.videoId
+                PlaybackCache.remove(q.videoId)
+                urlCache.remove(q.videoId)
+                val snapshot = queue
+                scope.launch {
+                    status = "Stream blocked — fetching fallback…"
+                    val file = runCatching {
+                        Downloader.cacheForPlayback(context, q.videoId)
+                    }.getOrNull()
+                    recoveringVideoId = null
+                    if (file == null) {
+                        status = "Streaming blocked"
+                        snackbarHostState.showSnackbar(
+                            "Streaming failed: YouTube API blocked."
+                        )
+                        return@launch
+                    }
+                    Log.d("PLAYBACK", "recovered ${q.videoId} via local cache")
+                    playFromQueue(snapshot, idx)
+                }
+            }
+        }
+        c.addListener(listener)
+        onDispose { c.removeListener(listener) }
+    }
+
     fun playNext() {
         if (queueIndex < 0) return
         val c = controller ?: return
@@ -1021,7 +1111,13 @@ fun PlayerScreen(
     }
 
     fun appendToQueue(song: Song) {
-        val item = QueueItem(song.videoId, song.title)
+        val item = QueueItem(song.videoId, song.title, song.artist)
+        if (queueIndex < 0 || queue.isEmpty()) {
+            // No active queue to append to — start the song instead of
+            // silently filling a queue the player isn't using.
+            playFromQueue(listOf(item), 0)
+            return
+        }
         queue = queue + item
         status = "Added to queue: ${song.title}"
         // Appending leaves existing indices intact; let the window pick it up
@@ -1047,7 +1143,7 @@ fun PlayerScreen(
     }
 
     fun insertIntoQueueNext(song: Song) {
-        val item = QueueItem(song.videoId, song.title)
+        val item = QueueItem(song.videoId, song.title, song.artist)
         if (queueIndex < 0) {
             // Nothing playing — start it
             playFromQueue(listOf(item), 0)
@@ -1099,7 +1195,7 @@ fun PlayerScreen(
                     return@launch
                 }
                 playFromQueue(
-                    mix.map { QueueItem(it.videoId, it.title) },
+                    mix.map { QueueItem(it.videoId, it.title, it.artist) },
                     0,
                     prefetchAhead = 4,
                     mixTitle = seed.title
@@ -1212,8 +1308,21 @@ fun PlayerScreen(
         }
         when (slot.type) {
             "song" -> {
+                // Discovery source: a pinned song opens a mix around it rather
+                // than a one-track queue (Rule 2).
                 slot.refId?.let { vid ->
-                    playFromQueue(listOf(QueueItem(vid, slot.title ?: "")), 0)
+                    scope.launch {
+                        val song = runCatching { repo.get(vid) }.getOrNull()
+                            ?: Song(
+                                videoId = vid,
+                                title = slot.title ?: "",
+                                artist = "",
+                                thumbnailUrl = slot.thumbnailUrl ?: youtubeThumb(vid),
+                                lastPlayedAt = 0L,
+                                playCount = 0
+                            )
+                        startMix(song)
+                    }
                 }
             }
             "playlist" -> {
@@ -1221,20 +1330,20 @@ fun PlayerScreen(
                 scope.launch {
                     val songs = playlistRepo.songs(pid).first()
                     if (songs.isNotEmpty()) {
-                        playFromQueue(songs.map { QueueItem(it.videoId, it.title) }, 0)
+                        playFromQueue(songs.map { QueueItem(it.videoId, it.title, it.artist) }, 0)
                     }
                 }
             }
             "shuffle_fav" -> {
                 val shuffled = favorites.shuffled()
                 if (shuffled.isNotEmpty()) {
-                    playFromQueue(shuffled.map { QueueItem(it.videoId, it.title) }, 0)
+                    playFromQueue(shuffled.map { QueueItem(it.videoId, it.title, it.artist) }, 0)
                 }
             }
             "shuffle_recent" -> {
                 val shuffled = forYouRecent.shuffled()
                 if (shuffled.isNotEmpty()) {
-                    playFromQueue(shuffled.map { QueueItem(it.videoId, it.title) }, 0)
+                    playFromQueue(shuffled.map { QueueItem(it.videoId, it.title, it.artist) }, 0)
                 }
             }
         }
@@ -1309,7 +1418,25 @@ fun PlayerScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        if (showPlaylists) {
+        if (artistScreenName != null) {
+            androidx.activity.compose.BackHandler(enabled = true) {
+                artistScreenName = null
+            }
+            ArtistScreen(
+                artistName = artistScreenName!!,
+                onBack = { artistScreenName = null },
+                onPlaySongs = { songs, index ->
+                    // Artist page is a container: whole list, no Mix (Rule 1).
+                    playFromQueue(
+                        songs.map { QueueItem(it.videoId, it.title, it.artist) },
+                        index
+                    )
+                },
+                onSongMenu = { menuSong = it },
+                downloadIds = downloadIds,
+                loadingVideoId = loadingVideoId
+            )
+        } else if (showPlaylists) {
             androidx.activity.compose.BackHandler {
                 if (openPlaylistId != null) openPlaylistId = null else showPlaylists = false
             }
@@ -1322,7 +1449,7 @@ fun PlayerScreen(
                 },
                 onOpenPlaylist = { id -> openPlaylistId = id },
                 onPlayFromPlaylist = { songs, index ->
-                    playFromQueue(songs.map { QueueItem(it.videoId, it.title) }, index)
+                    playFromQueue(songs.map { QueueItem(it.videoId, it.title, it.artist) }, index)
                 },
                 onCreatePlaylist = { showNewPlaylistDialog = true },
                 playlistName = playlists.firstOrNull { it.id == openPlaylistId }?.name ?: "",
@@ -1417,6 +1544,11 @@ fun PlayerScreen(
                                 playCount = 0
                             )
                         )
+                    }
+                },
+                onArtistClick = {
+                    nowPlayingArtist?.takeIf { it.isNotBlank() }?.let {
+                        artistScreenName = it
                     }
                 },
                 onShuffleToggle = {
@@ -1583,7 +1715,7 @@ fun PlayerScreen(
                         }
                     }
                 },
-                onPlay = { drop -> playFromQueue(listOf(QueueItem(drop.videoId, drop.title)), 0) },
+                onPlay = { drop -> playFromQueue(listOf(QueueItem(drop.videoId, drop.title, drop.artist)), 0) },
                 onLongClick = { drop -> menuSong = drop.asSong() },
                 onToggleFavorite = { drop ->
                     scope.launch { repo.toggleFavorite(drop.asSong()) }
@@ -1693,6 +1825,7 @@ fun PlayerScreen(
                     downloadIds = downloadIds,
                     loadingVideoId = loadingVideoId,
                     onSongMenu = { menuSong = it },
+                    onSongMix = { startMix(it) },
                     signedIn = signedIn,
                     friendsNowPlaying = friendsNowPlaying,
                     friendsList = friendsList,
@@ -1744,6 +1877,7 @@ fun PlayerScreen(
                     onPreExtract = { id -> preExtract(id) },
                     scope = scope,
                     onPlayFromQueue = { items, index -> playFromQueue(items, index) },
+                    onStartMix = { startMix(it) },
                     onToggleFavorite = { song -> scope.launch { repo.toggleFavorite(song) } },
                     onSongMenu = { menuSong = it },
                     downloadIds = downloadIds,
@@ -1761,6 +1895,23 @@ fun PlayerScreen(
                     onImportClick = { importRepo.reset(); showImport = true },
                     downloads = downloads,
                     downloadStates = downloadStates,
+                    onDownloadMenuAction = { d, action ->
+                        val song = Song(
+                            videoId = d.videoId,
+                            title = d.title,
+                            artist = d.artist,
+                            thumbnailUrl = d.thumbnailUrl,
+                            lastPlayedAt = 0L,
+                            playCount = 0
+                        )
+                        when (action) {
+                            DownloadMenuAction.PLAY_NEXT -> insertIntoQueueNext(song)
+                            DownloadMenuAction.ADD_TO_QUEUE -> appendToQueue(song)
+                            DownloadMenuAction.START_MIX -> startMix(song)
+                            DownloadMenuAction.GO_TO_ARTIST ->
+                                if (d.artist.isNotBlank()) artistScreenName = d.artist
+                        }
+                    },
                     onRemoveAllDownloads = { showRemoveAllDownloads = true },
                     onFindMusic = { tab = 1 },
                     playlists = playlists,
@@ -2012,30 +2163,43 @@ fun PlayerScreen(
 
         val song = menuSong
         if (song != null) {
-            androidx.compose.material3.ModalBottomSheet(
-                onDismissRequest = { menuSong = null }
-            ) {
-                Column(modifier = Modifier.padding(bottom = 24.dp)) {
-                    Text(
-                        text = song.title,
-                        style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            val goToArtist: (() -> Unit)? = if (song.artist.isNotBlank()) {
+                {
+                    artistScreenName = song.artist
+                    menuSong = null
+                }
+            } else null
+            SongActionsSheet(
+                song = song,
+                downloadState = downloadStates[song.videoId],
+                isDownloaded = downloadIds.contains(song.videoId),
+                onDismiss = { menuSong = null },
+                onPlayNext = {
+                    insertIntoQueueNext(song)
+                    menuSong = null
+                },
+                onAddToQueue = {
+                    appendToQueue(song)
+                    menuSong = null
+                },
+                onStartMix = { startMix(song) },
+                onDownload = {
+                    startDownload(
+                        song.videoId, song.title, song.artist,
+                        song.thumbnailUrl, 0L
                     )
-                    HorizontalDivider()
-
-                    MenuItem("Start Mix", icon = "📻") {
-                        startMix(song)
+                    menuSong = null
+                },
+                onRemoveDownload = {
+                    scope.launch {
+                        downloadRepo.get(song.videoId)?.let {
+                            Downloader.remove(context, it)
+                        }
                     }
-                    MenuItem("Play next") {
-                        insertIntoQueueNext(song)
-                        menuSong = null
-                    }
-                    MenuItem("Add to queue") {
-                        appendToQueue(song)
-                        menuSong = null
-                    }
+                    menuSong = null
+                },
+                onGoToArtist = goToArtist,
+                extraActions = {
                     MenuItem("Add to playlist") {
                         showAddToPlaylist = song
                         menuSong = null
@@ -2046,44 +2210,12 @@ fun PlayerScreen(
                         scope.launch { repo.toggleFavorite(song) }
                         menuSong = null
                     }
-                    val songDlState = downloadStates[song.videoId]
-                    when {
-                        songDlState is DownloadState.Downloading ->
-                            MenuItem("Downloading… ${songDlState.percent}%") { }
-                        songDlState is DownloadState.Queued ->
-                            MenuItem("Queued…") { }
-                        downloadIds.contains(song.videoId) ->
-                            MenuItem("Remove download") {
-                                scope.launch {
-                                    downloadRepo.get(song.videoId)?.let {
-                                        Downloader.remove(context, it)
-                                    }
-                                }
-                                menuSong = null
-                            }
-                        songDlState is DownloadState.Failed ->
-                            MenuItem("Retry download") {
-                                startDownload(
-                                    song.videoId, song.title, song.artist,
-                                    song.thumbnailUrl, 0L
-                                )
-                                menuSong = null
-                            }
-                        else ->
-                            MenuItem("Download") {
-                                startDownload(
-                                    song.videoId, song.title, song.artist,
-                                    song.thumbnailUrl, 0L
-                                )
-                                menuSong = null
-                            }
-                    }
                     MenuItem("Not interested") {
                         notInterested(song)
                         menuSong = null
                     }
                 }
-            }
+            )
         }
 
         nowPlayingFriend?.let { np ->
@@ -2256,52 +2388,58 @@ fun PlayerScreen(
 
         val ps = playlistMenuSong
         if (ps != null && playlistMenuPlaylistId != null) {
-            androidx.compose.material3.ModalBottomSheet(
-                onDismissRequest = { playlistMenuSong = null }
-            ) {
-                Column(modifier = Modifier.padding(bottom = 24.dp)) {
-                    Text(
-                        text = ps.title,
-                        style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            val psSong = Song(
+                videoId = ps.videoId,
+                title = ps.title,
+                artist = ps.artist,
+                thumbnailUrl = ps.thumbnailUrl ?: youtubeThumb(ps.videoId),
+                lastPlayedAt = 0L,
+                playCount = 0
+            )
+            val psGoToArtist: (() -> Unit)? = if (ps.artist.isNotBlank()) {
+                {
+                    artistScreenName = ps.artist
+                    playlistMenuSong = null
+                }
+            } else null
+            SongActionsSheet(
+                song = psSong,
+                downloadState = downloadStates[ps.videoId],
+                isDownloaded = downloadIds.contains(ps.videoId),
+                onDismiss = { playlistMenuSong = null },
+                onPlayNext = {
+                    insertIntoQueueNext(psSong)
+                    playlistMenuSong = null
+                },
+                onAddToQueue = {
+                    appendToQueue(psSong)
+                    playlistMenuSong = null
+                },
+                onStartMix = { startMix(psSong) },
+                onDownload = {
+                    startDownload(
+                        ps.videoId, ps.title, ps.artist,
+                        ps.thumbnailUrl, 0L
                     )
-                    HorizontalDivider()
-
-                    MenuItem("Play next") {
-                        insertIntoQueueNext(
-                            Song(
-                                videoId = ps.videoId,
-                                title = ps.title,
-                                artist = ps.artist,
-                                thumbnailUrl = ps.thumbnailUrl ?: youtubeThumb(ps.videoId),
-                                lastPlayedAt = 0L,
-                                playCount = 0
-                            )
-                        )
-                        playlistMenuSong = null
+                    playlistMenuSong = null
+                },
+                onRemoveDownload = {
+                    scope.launch {
+                        downloadRepo.get(ps.videoId)?.let {
+                            Downloader.remove(context, it)
+                        }
                     }
-                    MenuItem("Add to queue") {
-                        appendToQueue(
-                            Song(
-                                videoId = ps.videoId,
-                                title = ps.title,
-                                artist = ps.artist,
-                                thumbnailUrl = ps.thumbnailUrl ?: youtubeThumb(ps.videoId),
-                                lastPlayedAt = 0L,
-                                playCount = 0
-                            )
-                        )
-                        playlistMenuSong = null
-                    }
+                    playlistMenuSong = null
+                },
+                onGoToArtist = psGoToArtist,
+                extraActions = {
                     MenuItem("Remove from playlist") {
                         val pid = playlistMenuPlaylistId!!
                         scope.launch { playlistRepo.removeSong(pid, ps.videoId) }
                         playlistMenuSong = null
                     }
                 }
-            }
+            )
         }
 
         val sdPos = speedDialMenuPosition

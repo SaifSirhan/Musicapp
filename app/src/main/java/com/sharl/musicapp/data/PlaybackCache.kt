@@ -99,6 +99,12 @@ object PlaybackCache {
         save()
     }
 
+    /** Drops one entry, e.g. after ExoPlayer reports the CDN URL is 403. */
+    @Synchronized
+    fun remove(videoId: String) {
+        if (mem.remove(videoId) != null) save()
+    }
+
     @Synchronized
     fun clear(context: Context) {
         mem.clear()

@@ -60,6 +60,7 @@ fun ColumnScope.LibraryTab(
     downloadStates: Map<String, DownloadState>,
     onRemoveAllDownloads: () -> Unit,
     onFindMusic: () -> Unit,
+    onDownloadMenuAction: (Download, DownloadMenuAction) -> Unit = { _, _ -> },
     playlists: List<Playlist>,
     openPlaylistId: Long?,
     onOpenPlaylistChange: (Long?) -> Unit,
@@ -174,7 +175,7 @@ fun ColumnScope.LibraryTab(
                     downloadStates = downloadStates,
                     onPlay = { index ->
                         onPlayFromQueue(
-                            downloads.map { QueueItem(it.videoId, it.title) },
+                            downloads.map { QueueItem(it.videoId, it.title, it.artist) },
                             index
                         )
                     },
@@ -182,7 +183,8 @@ fun ColumnScope.LibraryTab(
                         scope.launch { Downloader.remove(context, d) }
                     },
                     onRemoveAll = { onRemoveAllDownloads() },
-                    onFindMusic = { onFindMusic() }
+                    onFindMusic = { onFindMusic() },
+                    onMenuAction = onDownloadMenuAction
                 )
             }
             1 -> Box(
@@ -197,7 +199,7 @@ fun ColumnScope.LibraryTab(
                     onBack = { onOpenPlaylistChange(null) },
                     onOpenPlaylist = { id -> onOpenPlaylistChange(id) },
                     onPlayFromPlaylist = { songs, index ->
-                        onPlayFromQueue(songs.map { QueueItem(it.videoId, it.title) }, index)
+                        onPlayFromQueue(songs.map { QueueItem(it.videoId, it.title, it.artist) }, index)
                     },
                     onCreatePlaylist = { onCreatePlaylist() },
                     playlistName = playlists.firstOrNull { it.id == openPlaylistId }?.name ?: "",
@@ -227,7 +229,7 @@ fun ColumnScope.LibraryTab(
                             .weight(1f)
                             .padding(top = 8.dp)
                     ) {
-                        val items = favorites.map { QueueItem(it.videoId, it.title) }
+                        val items = favorites.map { QueueItem(it.videoId, it.title, it.artist) }
                         itemsIndexed(favorites, key = { _, song -> song.videoId }) { idx, song ->
                             SongRow(
                                 song = song,
@@ -235,7 +237,8 @@ fun ColumnScope.LibraryTab(
                                 onToggleFavorite = { onToggleFavorite(song) },
                                 onLongClick = { onSongMenu(song) },
                                 showDownloaded = downloadIds.contains(song.videoId),
-                                isLoading = song.videoId == loadingVideoId
+                                isLoading = song.videoId == loadingVideoId,
+                                onMenuClick = { onSongMenu(song) }
                             )
                         }
                     }
@@ -253,7 +256,7 @@ fun ColumnScope.LibraryTab(
                                     .padding(8.dp)
                                     .clickable {
                                         onPlayFromQueue(
-                                            favorites.map { QueueItem(it.videoId, it.title) },
+                                            favorites.map { QueueItem(it.videoId, it.title, it.artist) },
                                             favorites.indexOf(song)
                                         )
                                     }
@@ -302,7 +305,9 @@ fun ColumnScope.LibraryTab(
                     onOpenFriend = { f -> onOpenFriend(f) },
                     onPlayFriendSongs = { idx ->
                         onPlayFromQueue(
-                            selectedFriendSongs.map { QueueItem(it.videoId, it.title ?: "") },
+                            selectedFriendSongs.map {
+                                QueueItem(it.videoId, it.title ?: "", it.artist ?: "")
+                            },
                             idx
                         )
                     },

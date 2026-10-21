@@ -29,7 +29,8 @@ fun SongRow(
     onToggleFavorite: () -> Unit,
     onLongClick: () -> Unit,
     showDownloaded: Boolean = false,
-    isLoading: Boolean = false
+    isLoading: Boolean = false,
+    onMenuClick: (() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
@@ -75,6 +76,11 @@ fun SongRow(
                 text = if (song.isFavorite) "★" else "☆",
                 style = MaterialTheme.typography.titleLarge
             )
+        }
+        if (onMenuClick != null) {
+            IconButton(onClick = onMenuClick) {
+                Text("⋮", style = MaterialTheme.typography.titleLarge)
+            }
         }
         if (isLoading) {
             Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {

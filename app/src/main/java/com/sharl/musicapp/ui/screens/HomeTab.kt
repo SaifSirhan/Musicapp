@@ -45,6 +45,7 @@ fun ColumnScope.HomeTab(
     forYouRecent: List<Song>,
     onPreExtract: suspend (String) -> Unit,
     onPlayFromQueue: (List<QueueItem>, Int) -> Unit,
+    onSongMix: (Song) -> Unit,
     downloadIds: List<String>,
     loadingVideoId: String?,
     onSongMenu: (Song) -> Unit,
@@ -105,12 +106,7 @@ fun ColumnScope.HomeTab(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable {
-                                            onPlayFromQueue(
-                                                quickPicks30.map { QueueItem(it.videoId, it.title) },
-                                                quickPicks30.indexOf(song)
-                                            )
-                                        }
+                                        .clickable { onSongMix(song) }
                                         .padding(horizontal = 16.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
@@ -237,7 +233,7 @@ fun ColumnScope.HomeTab(
                         key = { it.videoId }
                     ) { drop ->
                         NewDropCard(drop) {
-                            onPlayFromQueue(listOf(QueueItem(drop.videoId, drop.title)), 0)
+                            onPlayFromQueue(listOf(QueueItem(drop.videoId, drop.title, drop.artist)), 0)
                         }
                     }
                 }
@@ -312,7 +308,7 @@ fun ColumnScope.HomeTab(
                     songs = forYouRecent,
                     onSongClick = { song ->
                         onPlayFromQueue(
-                            forYouRecent.map { QueueItem(it.videoId, it.title) },
+                            forYouRecent.map { QueueItem(it.videoId, it.title, it.artist) },
                             forYouRecent.indexOf(song)
                         )
                     }
@@ -325,7 +321,7 @@ fun ColumnScope.HomeTab(
                         songs = forYouByArtist,
                         onSongClick = { song ->
                             onPlayFromQueue(
-                                forYouByArtist.map { QueueItem(it.videoId, it.title) },
+                                forYouByArtist.map { QueueItem(it.videoId, it.title, it.artist) },
                                 forYouByArtist.indexOf(song)
                             )
                         },
@@ -340,7 +336,7 @@ fun ColumnScope.HomeTab(
                     songs = forYouFavorites,
                     onSongClick = { song ->
                         onPlayFromQueue(
-                            forYouFavorites.map { QueueItem(it.videoId, it.title) },
+                            forYouFavorites.map { QueueItem(it.videoId, it.title, it.artist) },
                             forYouFavorites.indexOf(song)
                         )
                     }

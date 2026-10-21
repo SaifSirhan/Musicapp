@@ -33,7 +33,7 @@ fun ForYouScreen(
                 songs = forYouRecent,
                 onSongClick = { song ->
                     playFromQueue(
-                        forYouRecent.map { QueueItem(it.videoId, it.title) },
+                        forYouRecent.map { QueueItem(it.videoId, it.title, it.artist) },
                         forYouRecent.indexOf(song)
                     )
                 }
@@ -45,7 +45,7 @@ fun ForYouScreen(
                 songs = forYouTop,
                 onSongClick = { song ->
                     playFromQueue(
-                        forYouTop.map { QueueItem(it.videoId, it.title) },
+                        forYouTop.map { QueueItem(it.videoId, it.title, it.artist) },
                         forYouTop.indexOf(song)
                     )
                 }
@@ -58,7 +58,7 @@ fun ForYouScreen(
                     songs = forYouByArtist,
                     onSongClick = { song ->
                         playFromQueue(
-                            forYouByArtist.map { QueueItem(it.videoId, it.title) },
+                            forYouByArtist.map { QueueItem(it.videoId, it.title, it.artist) },
                             forYouByArtist.indexOf(song)
                         )
                     }
@@ -71,7 +71,7 @@ fun ForYouScreen(
                 songs = forYouFavorites,
                 onSongClick = { song ->
                     playFromQueue(
-                        forYouFavorites.map { QueueItem(it.videoId, it.title) },
+                        forYouFavorites.map { QueueItem(it.videoId, it.title, it.artist) },
                         forYouFavorites.indexOf(song)
                     )
                 }

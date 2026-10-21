@@ -94,6 +94,7 @@ fun NowPlayingScreen(
     playbackSpeed: Float = 1f,
     onPlaybackSpeedChange: (Float) -> Unit = {},
     onNotInterested: () -> Unit = {},
+    onArtistClick: () -> Unit = {},
     onShuffleToggle: () -> Unit,
     onRepeatToggle: () -> Unit
 ) {
@@ -222,7 +223,10 @@ fun NowPlayingScreen(
                     textAlign = TextAlign.Center,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = artist.isNotBlank(), onClick = onArtistClick)
+                        .padding(vertical = 2.dp)
                 )
                 if (isLoading && showExtracting) {
                     Spacer(modifier = Modifier.size(6.dp))
