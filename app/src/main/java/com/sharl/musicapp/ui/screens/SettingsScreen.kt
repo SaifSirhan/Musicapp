@@ -97,8 +97,17 @@ fun SettingsScreen(
     onOpenDiagnostics: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    // Hidden developer entry: seven taps on the About version line.
+    // Hidden developer entry: seven taps on either version line (About or
+    // Updates). Both share the counter, so the screen opens wherever the user
+    // taps; the Updates copy is the one they see first.
     var versionTaps by remember { mutableStateOf(0) }
+    val onVersionTap = {
+        versionTaps++
+        if (versionTaps >= 7) {
+            versionTaps = 0
+            onOpenDiagnostics()
+        }
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -160,13 +169,7 @@ fun SettingsScreen(
             "Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.clickable {
-                versionTaps++
-                if (versionTaps >= 7) {
-                    versionTaps = 0
-                    onOpenDiagnostics()
-                }
-            }
+            modifier = Modifier.clickable(onClick = onVersionTap)
         )
         HorizontalDivider()
 
@@ -444,7 +447,8 @@ fun SettingsScreen(
         SettingsSectionHeader("Updates")
         Text(
             "Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
-            style = MaterialTheme.typography.bodyMedium
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.clickable(onClick = onVersionTap)
         )
         Text(
             "Playback engine: ${if (fastEngine) "Fast" else "Slow (Fallback)"}",

@@ -54,8 +54,8 @@ android {
         applicationId = "com.sharl.musicapp"
         minSdk = 24
         targetSdk = 37
-        versionCode = 18
-        versionName = "0.17.1"
+        versionCode = 19
+        versionName = "0.18.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

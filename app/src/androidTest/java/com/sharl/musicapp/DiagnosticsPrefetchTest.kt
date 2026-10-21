@@ -1,6 +1,10 @@
 package com.sharl.musicapp
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.sharl.musicapp.data.DiagnosticsManager
 import com.sharl.musicapp.data.InnerTubeHelper
 import kotlinx.coroutines.runBlocking
@@ -30,6 +34,24 @@ class DiagnosticsPrefetchTest {
         if (url != null) {
             assertTrue("retrieved URL should be https, got '$url'", url.startsWith("https://"))
         }
+    }
+
+    // What "Copy to Clipboard" puts on the clipboard: the full report, which
+    // must be valid for the clipboard API the UI uses.
+    @Test
+    fun reportRoundTripsThroughTheClipboard() {
+        DiagnosticsManager.reset()
+        DiagnosticsManager.recordInnerTube(true, 321, "IOS OK 321ms")
+        DiagnosticsManager.recordPrefetch("Queued 4 tracks")
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val report = DiagnosticsManager.report()
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            cm.setPrimaryClip(ClipData.newPlainText("MusicApp diagnostics", report))
+        }
+        assertTrue("report should carry the prefetch line:\n$report", report.contains("Queued 4 tracks"))
+        assertTrue("report should start with the version banner:\n$report",
+            report.startsWith("MusicApp ${BuildConfig.VERSION_NAME}"))
     }
 
     @Test

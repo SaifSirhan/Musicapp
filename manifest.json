@@ -1,7 +1,7 @@
 {
-  "versionCode": 18,
-  "versionName": "0.17.1",
-  "apkUrl": "https://github.com/SaifSirhan/Musicapp/releases/download/v0.17.1/app-release.apk",
-  "sha256": "52ca85bfc15621fe0f6d7b3a461f4d93d8c5a088aac2248b1da56a88708f22ba",
-  "notes": "Phase 24b hotfix: in-app updates no longer crash at 99%. The APK is now shared through a valid FileProvider root, the installer handover is wrapped in error reporting, downloads are verified and finalized atomically, and SHA-256 is computed while streaming. Note: users still on 0.17.0 must install this release once manually; OTA works from 0.17.1 onward."
+  "versionCode": 19,
+  "versionName": "0.18.0",
+  "apkUrl": "https://github.com/SaifSirhan/Musicapp/releases/download/v0.18.0/app-release.apk",
+  "sha256": "3a82940432bd400f68473767fc4e2758bd4640778f69640bf70c79e9bc26b6fb",
+  "notes": "Phase 27: hidden Diagnostics screen (tap the version line 7 times in Settings), 4-track prefetch that starts before the current track resolves, InnerTube TVHTML5_SIMPLY_EMBEDDED_PLAYER fallback, and ciphered-only audio treated as a failed client instead of a 403 in the player."
 }
