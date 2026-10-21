@@ -305,7 +305,7 @@ fun SettingsScreen(
                 .padding(vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            listOf(0, 2, 5, 10, 15, 20, 30).forEach { seconds ->
+            listOf(0, 3, 5, 10, 15, 20).forEach { seconds ->
                 FilterChip(
                     selected = crossfadeSeconds == seconds,
                     onClick = { onCrossfadeSecondsChange(seconds) },
@@ -313,14 +313,12 @@ fun SettingsScreen(
                 )
             }
         }
-        if (crossfadeSeconds > 0) {
-            Text(
-                "This player build has no true crossfade, so silence is skipped " +
-                    "between tracks instead.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
+        Text(
+            "Note: Crossfading requires running two audio engines at once and " +
+                "may increase battery usage.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
 
         Row(
             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),

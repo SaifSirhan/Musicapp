@@ -829,6 +829,14 @@ fun PlayerScreen(
     fun syncPlayerWindow(currentIndex: Int) {
         val c = controller ?: return
         if (currentIndex < 0 || queue.isEmpty()) return
+        // Both the queue index and the playlist window must be confirmed by
+        // the controller: after a crossfade handoff the MediaSession moves to
+        // the standby player asynchronously. Appending against a stale window
+        // would duplicate tracks, so wait (callers poll) instead.
+        val currentTag = c.currentMediaItem?.requestMetadata?.extras
+            ?.getInt("queue_index", -1) ?: -1
+        if (currentTag != currentIndex || c.currentMediaItemIndex < 0) return
+        windowStart = currentIndex - c.currentMediaItemIndex
         var nextToLoad = windowStart + c.mediaItemCount
         while (nextToLoad <= currentIndex + PRELOAD_AHEAD && nextToLoad < queue.size) {
             val q = queue[nextToLoad]
@@ -836,6 +844,21 @@ fun PlayerScreen(
             c.addMediaItem(buildMediaItem(q.videoId, nextToLoad, cached.first, cached.second))
             nextToLoad++
         }
+    }
+
+    // True once the controller's current item carries [index]. Crossfade
+    // handoffs swap the session player, and controller state trails that swap
+    // by a few frames.
+    suspend fun awaitCurrentTag(index: Int, timeoutMs: Long = 2_000L): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val c = controller ?: return false
+            val tag = c.currentMediaItem?.requestMetadata?.extras
+                ?.getInt("queue_index", -1) ?: -1
+            if (tag == index) return true
+            kotlinx.coroutines.delay(30)
+        }
+        return false
     }
 
     // Update the now-playing UI, record the play and (re)fetch lyrics for the
@@ -1085,6 +1108,10 @@ fun PlayerScreen(
             val upcoming = listOf(newIndex + 1, newIndex + 2, newIndex + 3)
                 .filter { it < queue.size }
             scope.launch {
+                // On a crossfade handoff the session player swaps; wait for the
+                // controller to expose the new current item before touching the
+                // window so windowStart is derived from the right playlist.
+                awaitCurrentTag(newIndex)
                 upcoming.forEach { idx ->
                     preExtract(queue[idx].videoId, queue[idx].title)
                     syncPlayerWindow(queueIndex)
@@ -1106,6 +1133,19 @@ fun PlayerScreen(
             } else {
                 isPlaying = false
                 status = "End of queue"
+            }
+        }
+    }
+
+    // Crossfade engine: resolve the next track early when it is not loaded yet,
+    // then extend the playlist so the fade can overlap two real sources.
+    LaunchedEffect(Unit) {
+        QueueAdvanceSignaler.prefetchNext.collect { newIndex ->
+            if (newIndex !in queue.indices) return@collect
+            val item = queue[newIndex]
+            scope.launch {
+                if (item.localUri == null) preExtract(item.videoId, item.title)
+                syncPlayerWindow(queueIndex)
             }
         }
     }

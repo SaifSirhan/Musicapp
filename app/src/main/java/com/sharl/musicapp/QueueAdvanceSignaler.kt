@@ -22,8 +22,13 @@ object QueueAdvanceSignaler {
     private val _queueEnded = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val queueEnded: SharedFlow<Unit> = _queueEnded.asSharedFlow()
 
+    // Crossfade engine asked for the next queue index to be resolved/loaded.
+    private val _prefetchNext = MutableSharedFlow<Int>(extraBufferCapacity = 8)
+    val prefetchNext: SharedFlow<Int> = _prefetchNext.asSharedFlow()
+
     fun notifyTrackChanged(newIndex: Int) { _trackChanged.tryEmit(newIndex) }
     fun notifyQueueEnded() { _queueEnded.tryEmit(Unit) }
+    fun notifyPrefetchNext(index: Int) { _prefetchNext.tryEmit(index) }
 
     // Legacy support — kept for any remaining callers during the transition.
     private var listener: (() -> Unit)? = null

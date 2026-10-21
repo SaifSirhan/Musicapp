@@ -4,7 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.media.audiofx.LoudnessEnhancer
 import android.util.Log
-import androidx.media3.common.MediaItem
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -13,17 +14,36 @@ import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.sharl.musicapp.data.SettingsRepo
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 
+/**
+ * Owns two ExoPlayer instances so tracks can overlap for a true crossfade.
+ * [playerA] is the session player by default; [CrossfadeManager] promotes
+ * [playerB] once a fade completes. Both use USAGE_MEDIA/CONTENT_TYPE_MUSIC and
+ * only the active player handles audio focus, so the standby player's stream
+ * is never ducked (or paused by a focus loss) while it is being faded in.
+ */
 class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
-    private var player: ExoPlayer? = null
-    private var loudnessEnhancer: LoudnessEnhancer? = null
+    private var playerA: ExoPlayer? = null
+    private var playerB: ExoPlayer? = null
+    private var crossfadeManager: CrossfadeManager? = null
+    private val enhancers = HashMap<ExoPlayer, LoudnessEnhancer>()
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val settings by lazy { SettingsRepo(this) }
     private val prefs by lazy { getSharedPreferences("settings", Context.MODE_PRIVATE) }
 
+    private val audioAttributes = AudioAttributes.Builder()
+        .setUsage(C.USAGE_MEDIA)
+        .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+        .build()
+
     // The UI writes preferences through SettingsRepo; watching the same file
-    // here applies speed/crossfade/normalisation to an already-running player.
+    // here applies speed/crossfade/normalisation to already-running players.
     private val settingsListener =
         SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             when (key) {
@@ -48,41 +68,41 @@ class PlaybackService : MediaSessionService() {
         )
         val msFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dsFactory)
 
-        val exoPlayer = ExoPlayer.Builder(this)
+        val exoA = ExoPlayer.Builder(this)
             .setMediaSourceFactory(msFactory)
+            .setAudioAttributes(audioAttributes, true)
             .build()
-        player = exoPlayer
+        val exoB = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(msFactory)
+            .setAudioAttributes(audioAttributes, false)
+            .build()
+        playerA = exoA
+        playerB = exoB
 
-        exoPlayer.addListener(object : Player.Listener {
-            override fun onPlayerError(error: PlaybackException) {
-                Log.e("EXOPLAYER", "code=${error.errorCodeName} msg=${error.message}", error)
-            }
+        attachPlayer(exoA)
+        attachPlayer(exoB)
 
-            override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
-                Log.d("ISLAND", "title=${mediaMetadata.title} artist=${mediaMetadata.artist}")
-            }
+        mediaSession = MediaSession.Builder(this, exoA).build()
 
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                // The UI tags every MediaItem with its queue index in the
-                // request-metadata extras so we can report exactly which track
-                // the playlist advanced to (gapless auto-advance or seek).
-                val idx = mediaItem?.requestMetadata?.extras?.getInt("queue_index", -1) ?: -1
-                if (idx >= 0) {
-                    QueueAdvanceSignaler.notifyTrackChanged(idx)
-                }
-            }
-
-            override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_ENDED) {
-                    // The loaded window is exhausted (no next item and repeat
-                    // off). Tell the UI to load the next batch / handle repeat.
-                    QueueAdvanceSignaler.notifyQueueEnded()
-                    QueueAdvanceSignaler.notifyTrackEnded() // legacy
-                }
-            }
-        })
-
-        mediaSession = MediaSession.Builder(this, exoPlayer).build()
+        crossfadeManager = CrossfadeManager(
+            scope = serviceScope,
+            playerA = exoA,
+            playerB = exoB,
+            crossfadeDurationMs = { settings.crossfadeSeconds * 1_000L },
+            onActivePlayerChanged = { newActive, old ->
+                runCatching { mediaSession?.player = newActive }
+                    .onFailure { Log.e("CROSSFADE", "MediaSession handoff failed", it) }
+                // Only the active engine should own audio focus; the standby
+                // would otherwise receive the LOSS that pauses the active one.
+                runCatching { newActive.setAudioAttributes(audioAttributes, true) }
+                    .onFailure { Log.w("CROSSFADE", "focus handoff failed", it) }
+                runCatching { old.setAudioAttributes(audioAttributes, false) }
+                    .onFailure { Log.w("CROSSFADE", "focus release failed", it) }
+                applyPlaybackSettingsTo(newActive)
+            },
+            onTrackChanged = { index -> QueueAdvanceSignaler.notifyTrackChanged(index) },
+            onPrefetchNext = { index -> QueueAdvanceSignaler.notifyPrefetchNext(index) }
+        ).also { it.start() }
 
         val notificationProvider = DefaultMediaNotificationProvider.Builder(this).build()
         notificationProvider.setSmallIcon(R.drawable.ic_music_note)
@@ -91,40 +111,61 @@ class PlaybackService : MediaSessionService() {
         applyPlaybackSettings()
         prefs.registerOnSharedPreferenceChangeListener(settingsListener)
 
-        Log.d("CTRL", "PlaybackService created, MediaSession built")
+        Log.d("CTRL", "PlaybackService created with dual players")
+    }
+
+    private fun attachPlayer(player: ExoPlayer) {
+        player.addListener(object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                Log.e(
+                    "EXOPLAYER",
+                    "player=${if (player === playerA) "A" else "B"} " +
+                        "code=${error.errorCodeName} msg=${error.message}",
+                    error
+                )
+            }
+
+            override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+                if (player !== crossfadeManager?.active) return
+                Log.d("ISLAND", "title=${mediaMetadata.title} artist=${mediaMetadata.artist}")
+            }
+
+            override fun onPlaybackStateChanged(state: Int) {
+                // Only the active engine reports the end of the queue; the
+                // standby is stopped during every handoff.
+                if (state != Player.STATE_ENDED) return
+                if (player !== crossfadeManager?.active) return
+                if (crossfadeManager?.isFading == true) return
+                QueueAdvanceSignaler.notifyQueueEnded()
+                QueueAdvanceSignaler.notifyTrackEnded() // legacy
+            }
+        })
     }
 
     private fun applyPlaybackSettings() {
-        val p = player ?: return
+        val list = listOfNotNull(playerA, playerB)
+        if (list.isEmpty()) return
+        list.forEach { applyPlaybackSettingsTo(it) }
+        crossfadeManager?.onSettingsChanged()
+    }
+
+    private fun applyPlaybackSettingsTo(p: ExoPlayer) {
         runCatching { p.setPlaybackSpeed(settings.playbackSpeed) }
             .onFailure { Log.w("SPEED", "Could not apply playback speed", it) }
-
-        val crossfade = settings.crossfadeSeconds
-        // media3 1.10.1 has no Player.setCrossfadeDurationMs (verified against
-        // the cached AAR), so the spec's fallback is used: tighten the gaps by
-        // skipping silence. The requested duration is logged for diagnostics.
-        runCatching { p.setSkipSilenceEnabled(crossfade > 0) }
-            .onFailure { Log.w("CROSSFADE", "Skip-silence fallback unavailable", it) }
-        if (crossfade > 0) {
-            Log.i(
-                "CROSSFADE",
-                "Requested ${crossfade}s crossfade — setCrossfadeDurationMs is not " +
-                    "available in media3 1.10.1, using silence-skip fallback"
-            )
-        }
-
+        // Real crossfade replaces the Phase 22 silence-skip fallback.
+        runCatching { p.setSkipSilenceEnabled(false) }
         applyVolumeNormalization(p)
     }
 
     private fun applyVolumeNormalization(p: ExoPlayer) {
         try {
             if (!settings.normalizeVolume) {
-                loudnessEnhancer?.enabled = false
+                enhancers[p]?.enabled = false
                 return
             }
-            val fx = loudnessEnhancer ?: LoudnessEnhancer(p.audioSessionId).also {
+            val fx = enhancers[p] ?: LoudnessEnhancer(p.audioSessionId).also {
                 it.setTargetGain(400) // +4 dB
-                loudnessEnhancer = it
+                enhancers[p] = it
             }
             fx.enabled = true
             Log.d("AUDIO", "LoudnessEnhancer on, session=${p.audioSessionId}")
@@ -139,13 +180,18 @@ class PlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         prefs.unregisterOnSharedPreferenceChangeListener(settingsListener)
-        loudnessEnhancer?.release()
-        loudnessEnhancer = null
-        player?.release()
-        player = null
+        crossfadeManager?.release()
+        crossfadeManager = null
+        enhancers.values.forEach { runCatching { it.release() } }
+        enhancers.clear()
         mediaSession?.release()
         mediaSession = null
-        Log.d("CTRL", "PlaybackService destroyed, player and session released")
+        playerA?.release()
+        playerA = null
+        playerB?.release()
+        playerB = null
+        serviceScope.cancel()
+        Log.d("CTRL", "PlaybackService destroyed, dual players and session released")
         super.onDestroy()
     }
 }
