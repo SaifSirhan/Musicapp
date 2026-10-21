@@ -295,7 +295,7 @@ fun PlayerScreen(
     var showSongPickerForSlot by remember { mutableStateOf<Int?>(null) }
 
     val mixRepo = remember { MixRepository(context) }
-    var mixBuilding by remember { mutableStateOf(false) }
+    var mixGeneration by remember { mutableStateOf(0L) }
     // Seed title of the radio queue currently loaded, null for normal playback.
     var activeMixTitle by remember { mutableStateOf<String?>(null) }
     val followRepo = remember { FollowRepository(context) }
@@ -1219,34 +1219,54 @@ fun PlayerScreen(
         if (items[index].isVideo) showNowPlaying = true
     }
 
-    // Phase 19: build the radio queue off the UI thread, then hand it to the
-    // player. Only the first five tracks get warmed; the rest resolve lazily.
+    // Phase 26: silent mix. The seed starts immediately on its own; the radio
+    // station is generated in the background and swapped into the queue under
+    // the still-playing seed, with no blocking overlay.
     fun startMix(seed: Song) {
-        if (mixBuilding) return
         menuSong = null
+        val seedItem = QueueItem(seed.videoId, seed.title, seed.artist)
+        playFromQueue(listOf(seedItem), 0, mixTitle = seed.title)
+        // Guards against two mixes racing to rewrite the same queue.
+        val generation = ++mixGeneration
         scope.launch {
-            mixBuilding = true
-            status = "Building your mix..."
             try {
                 val mix = mixRepo.generateMix(seed)
+                if (generation != mixGeneration) return@launch
                 if (mix.size <= 1) {
-                    status = "Mix unavailable"
-                    snackbarHostState.showSnackbar("Couldn't build a mix — check your connection.")
+                    // Keep the seed playing; it already has a one-track queue.
+                    Log.d("MIX", "silent mix for ${seed.videoId} returned no neighbours")
                     return@launch
                 }
-                playFromQueue(
-                    mix.map { QueueItem(it.videoId, it.title, it.artist) },
-                    0,
-                    prefetchAhead = 4,
-                    mixTitle = seed.title
-                )
+                val c = controller ?: return@launch
+                val mixQueue = mix.map { QueueItem(it.videoId, it.title, it.artist) }
+                // The user moved on while the mix was building: their queue wins.
+                if (queue.getOrNull(queueIndex)?.videoId != seed.videoId) {
+                    Log.d("MIX", "queue changed during build; discarding mix")
+                    return@launch
+                }
+                queue = mixQueue
+                // Re-resolve the current position: a gapless transition may
+                // have moved it while the mix was building.
+                queueIndex = mixQueue.indexOfFirst { it.videoId == seed.videoId }.coerceAtLeast(0)
+                // The seed's item is already playing; replace only the tail so
+                // position is untouched (no setMediaItems, no prepare, no seek).
+                val loadedIndex = c.currentMediaItemIndex
+                if (loadedIndex < 0) return@launch
+                if (c.mediaItemCount > loadedIndex + 1) {
+                    c.removeMediaItems(loadedIndex + 1, c.mediaItemCount)
+                }
+                windowStart = queueIndex - loadedIndex
+                syncPlayerWindow(queueIndex)
+                Log.d("MIX", "silent mix swapped in: ${mix.size} tracks around ${seed.videoId}")
+                status = "Mix ready: ${mix.size} tracks"
+                // Warm the first neighbours so skips are instant; re-sync after.
+                mix.drop(1).take(4).forEach { preExtract(it.videoId, it.title) }
+                syncPlayerWindow(queueIndex)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                status = "Mix failed: ${e.message}"
-                snackbarHostState.showSnackbar("Couldn't build a mix — check your connection.")
-            } finally {
-                mixBuilding = false
+                // Never interrupt playback for a failed mix build.
+                Log.w("MIX", "silent mix failed for ${seed.videoId}", e)
             }
         }
     }
@@ -1899,11 +1919,7 @@ fun PlayerScreen(
                     topArtistName = topArtistName,
                     forYouByArtist = forYouByArtist,
                     forYouFavorites = forYouFavorites,
-                    playFromQueue = { items, index ->
-                        // Recommendations: warm the next two suggestions to disk
-                        // so their playback skips yt-dlp entirely.
-                        playFromQueue(items, index, downloadAhead = true)
-                    },
+                    startMix = { song -> startMix(song) },
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -2684,21 +2700,6 @@ fun PlayerScreen(
                 onBack = { showNowPlaying = false },
                 onAudioOnly = { isVideoMode = false }
             )
-        }
-
-        if (mixBuilding) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.6f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    androidx.compose.material3.CircularProgressIndicator()
-                    Spacer(Modifier.height(12.dp))
-                    Text("Building your mix…")
-                }
-            }
         }
     }
 }

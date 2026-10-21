@@ -39,10 +39,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
-import com.google.android.gms.common.api.Scope
 import com.sharl.musicapp.ImportService
+import com.sharl.musicapp.data.AuthRepository
 import com.sharl.musicapp.data.SettingsRepo
 import com.sharl.musicapp.data.SpotifyImporter
 import com.sharl.musicapp.data.YtmImporter
@@ -52,6 +51,7 @@ import com.sharl.musicapp.ui.components.SettingsSectionHeader
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.coroutines.resume
 
 /**
  * Account import: connects Spotify (Authorization Code) and YouTube Music
@@ -82,6 +82,9 @@ fun ImportAccountScreen(
     var status by remember { mutableStateOf<String?>(null) }
     var localError by remember { mutableStateOf<String?>(null) }
     val selected = remember { mutableStateMapOf<String, Boolean>() }
+    // Non-null while the user picks which Google account to import from.
+    var accountChooser by remember { mutableStateOf<List<android.accounts.Account>?>(null) }
+    var selectedYoutubeEmail by remember { mutableStateOf<String?>(null) }
 
     val running = importState is ImportState.Running
 
@@ -96,6 +99,7 @@ fun ImportAccountScreen(
     }
 
     val authorizationClient = remember { Identity.getAuthorizationClient(context) }
+    val authRepo = remember { AuthRepository() }
     val ytmLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
@@ -109,25 +113,66 @@ fun ImportAccountScreen(
         }
     }
 
+    fun authorizeYoutubeAs(account: android.accounts.Account) {
+        accountChooser = null
+        localError = null
+        scope.launch {
+            val auth = try {
+                authRepo.authorizeYoutube(context, account)
+            } catch (e: Exception) {
+                localError = e.message ?: "YouTube authorization failed."
+                return@launch
+            }
+            selectedYoutubeEmail = account.name
+            val pending = auth.pendingIntent
+            if (auth.hasResolution() && pending != null) {
+                ytmLauncher.launch(
+                    IntentSenderRequest.Builder(pending.intentSender).build()
+                )
+            } else {
+                applyYtmToken(auth.accessToken)
+            }
+        }
+    }
+
     fun connectYoutube() {
         localError = null
-        val request = AuthorizationRequest.builder()
-            .setRequestedScopes(listOf(Scope(YtmImporter.YOUTUBE_SCOPE)))
-            .build()
-        authorizationClient.authorize(request)
-            .addOnSuccessListener { auth ->
-                val pending = auth.pendingIntent
-                if (auth.hasResolution() && pending != null) {
-                    ytmLauncher.launch(
-                        IntentSenderRequest.Builder(pending.intentSender).build()
-                    )
-                } else {
-                    applyYtmToken(auth.accessToken)
+        scope.launch {
+            val accounts = runCatching { authRepo.googleAccounts(context) }
+                .onFailure { localError = it.message ?: "Could not list Google accounts." }
+                .getOrDefault(emptyList())
+            when {
+                accounts.isEmpty() ->
+                    localError = "No Google account is available on this device. " +
+                        "Add one in system settings, then try again."
+                accounts.size == 1 -> authorizeYoutubeAs(accounts.first())
+                else -> {
+                    // Disconnect was used at least once, so the user is
+                    // switching accounts: always make them pick.
+                    accountChooser = accounts
                 }
             }
-            .addOnFailureListener {
-                localError = it.message ?: "YouTube authorization failed."
+        }
+    }
+
+    fun disconnectYoutube() {
+        localError = null
+        // Clear local state first so the UI reacts immediately.
+        settings.clearGoogleAccessToken()
+        ytmToken = null
+        ytmPlaylists = emptyList()
+        selected.keys.filter { it.startsWith("ytm:") }.forEach { selected.remove(it) }
+        scope.launch {
+            val revoked = authRepo.revokeYoutubeAccess(context)
+            selectedYoutubeEmail = null
+            localError = if (revoked) {
+                "YouTube disconnected. Tap Connect YouTube Music to choose an account."
+            } else {
+                "YouTube disconnected on this device, but Google could not revoke the " +
+                    "grant. To switch accounts, remove the app's access in your Google " +
+                    "Account permissions, then connect again."
             }
+        }
     }
 
     LaunchedEffect(spotifyConnected) {
@@ -356,6 +401,26 @@ fun ImportAccountScreen(
         HorizontalDivider()
 
         SettingsSectionHeader("YouTube Music")
+        val chooser = accountChooser
+        if (chooser != null) {
+            Text(
+                "Choose the Google account to import from:",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+            chooser.forEach { account ->
+                TextButton(
+                    onClick = { authorizeYoutubeAs(account) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(account.name)
+                }
+            }
+            TextButton(onClick = {
+                accountChooser = null
+                connectYoutube()
+            }) { Text("Refresh account list") }
+        }
         if (ytmToken == null) {
             if (!signedIn) {
                 Text(
@@ -365,8 +430,10 @@ fun ImportAccountScreen(
                 )
             }
             Spacer(Modifier.height(8.dp))
-            Button(onClick = { connectYoutube() }) {
-                Text("Connect YouTube Music")
+            if (chooser == null) {
+                Button(onClick = { connectYoutube() }) {
+                    Text("Connect YouTube Music")
+                }
             }
         } else {
             Row(
@@ -374,17 +441,12 @@ fun ImportAccountScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "YouTube connected" + (accountEmail?.let { " ($it)" } ?: ""),
+                    "YouTube connected" +
+                        (selectedYoutubeEmail ?: accountEmail)?.let { " ($it)" } ?: "",
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.weight(1f)
                 )
-                TextButton(onClick = {
-                    settings.clearGoogleAccessToken()
-                    ytmToken = null
-                    ytmPlaylists = emptyList()
-                    selected.keys.filter { it.startsWith("ytm:") }
-                        .forEach { selected.remove(it) }
-                }) { Text("Disconnect") }
+                TextButton(onClick = { disconnectYoutube() }) { Text("Disconnect") }
             }
             if (ytmLoading) {
                 Row(verticalAlignment = Alignment.CenterVertically) {

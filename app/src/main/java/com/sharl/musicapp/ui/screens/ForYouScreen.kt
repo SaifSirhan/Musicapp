@@ -8,7 +8,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.sharl.musicapp.QueueItem
 import com.sharl.musicapp.data.Song
 import com.sharl.musicapp.ui.components.RecommendationRow
 
@@ -19,9 +18,12 @@ fun ForYouScreen(
     topArtistName: String?,
     forYouByArtist: List<Song>,
     forYouFavorites: List<Song>,
-    playFromQueue: (List<QueueItem>, Int) -> Unit,
+    startMix: (Song) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Rule 2: For You is a discovery surface, so a tap opens a radio station
+    // around the tapped song rather than a one-song queue.
+    val onClick: (Song) -> Unit = { song -> startMix(song) }
     LazyColumn(
         modifier = modifier
             .fillMaxWidth()
@@ -31,24 +33,14 @@ fun ForYouScreen(
             RecommendationRow(
                 title = "Recently Played",
                 songs = forYouRecent,
-                onSongClick = { song ->
-                    playFromQueue(
-                        forYouRecent.map { QueueItem(it.videoId, it.title, it.artist) },
-                        forYouRecent.indexOf(song)
-                    )
-                }
+                onSongClick = onClick
             )
         }
         item {
             RecommendationRow(
                 title = "Most Played",
                 songs = forYouTop,
-                onSongClick = { song ->
-                    playFromQueue(
-                        forYouTop.map { QueueItem(it.videoId, it.title, it.artist) },
-                        forYouTop.indexOf(song)
-                    )
-                }
+                onSongClick = onClick
             )
         }
         item {
@@ -56,12 +48,7 @@ fun ForYouScreen(
                 RecommendationRow(
                     title = "More from $topArtistName",
                     songs = forYouByArtist,
-                    onSongClick = { song ->
-                        playFromQueue(
-                            forYouByArtist.map { QueueItem(it.videoId, it.title, it.artist) },
-                            forYouByArtist.indexOf(song)
-                        )
-                    }
+                    onSongClick = onClick
                 )
             }
         }
@@ -69,12 +56,7 @@ fun ForYouScreen(
             RecommendationRow(
                 title = "Your Favorites",
                 songs = forYouFavorites,
-                onSongClick = { song ->
-                    playFromQueue(
-                        forYouFavorites.map { QueueItem(it.videoId, it.title, it.artist) },
-                        forYouFavorites.indexOf(song)
-                    )
-                }
+                onSongClick = onClick
             )
         }
         if (forYouRecent.isEmpty() && forYouTop.isEmpty() && forYouFavorites.isEmpty()) {
