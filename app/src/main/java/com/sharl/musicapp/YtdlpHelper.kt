@@ -2,6 +2,8 @@ package com.sharl.musicapp
 
 import android.content.Context
 import android.util.Log
+import com.sharl.musicapp.data.DiagnosticsManager
+import com.sharl.musicapp.data.InnerTubeHelper
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDL.UpdateChannel
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -96,10 +98,64 @@ object YtdlpHelper {
     private const val MIN_DURATION_MS = 45_000L
     private const val MAX_DURATION_MS = 12L * 60 * 1000
 
+    /**
+     * InnerTube search first (one HTTP round-trip, ~200-600ms), yt-dlp only when
+     * it returns nothing (offline, or the search layout changed shape). The
+     * fallback is ~3-5s because it spawns a process, so it is always logged.
+     */
     suspend fun searchYouTube(
         context: Context,
         query: String,
         limit: Int = 10
+    ): List<SearchResult> {
+        val started = System.currentTimeMillis()
+        val fast = runCatching { InnerTubeHelper.searchVideos(query, limit = 20) }.getOrDefault(emptyList())
+        if (fast.isNotEmpty()) {
+            val elapsed = System.currentTimeMillis() - started
+            Log.d("SEARCH", "'$query' InnerTube ${fast.size} results in ${elapsed}ms")
+            DiagnosticsManager.recordSearch(true, elapsed, "${fast.size} results via InnerTube")
+            return scoreResults(
+                fast.map { Raw(it.videoId, it.title, it.durationMs) },
+                limit
+            )
+        }
+        val slowStarted = System.currentTimeMillis()
+        Log.w("SEARCH", "InnerTube returned nothing for '$query'; falling back to yt-dlp")
+        val result = runCatching { searchWithYtdlp(context, query, limit) }
+            .onFailure {
+                DiagnosticsManager.recordSearch(
+                    false, System.currentTimeMillis() - started,
+                    "InnerTube empty, yt-dlp failed: ${it.message}"
+                )
+            }
+            .getOrDefault(emptyList())
+        if (result.isNotEmpty()) {
+            DiagnosticsManager.recordSearch(
+                true, System.currentTimeMillis() - started,
+                "${result.size} results via yt-dlp fallback (${System.currentTimeMillis() - slowStarted}ms)"
+            )
+        }
+        return result
+    }
+
+    // Duration/junk filters and the "official audio" boost, shared by both paths.
+    private data class Raw(val videoId: String, val title: String, val durationMs: Long?)
+
+    private fun scoreResults(raw: List<Raw>, limit: Int): List<SearchResult> =
+        raw
+            .filter { it.durationMs == null || it.durationMs in MIN_DURATION_MS..MAX_DURATION_MS }
+            .filter { r -> SEARCH_JUNK.none { r.title.contains(it, ignoreCase = true) } }
+            .sortedByDescending { r ->
+                if (SEARCH_PREFERRED.any { r.title.contains(it, ignoreCase = true) }) 1 else 0
+            }
+            .distinctBy { it.videoId }
+            .take(limit.coerceAtMost(10))
+            .map { r -> SearchResult(title = r.title, videoId = r.videoId, url = "https://www.youtube.com/watch?v=${r.videoId}") }
+
+    private suspend fun searchWithYtdlp(
+        context: Context,
+        query: String,
+        limit: Int
     ): List<SearchResult> =
         withContext(Dispatchers.IO) {
             ensureInitialized(context)
@@ -127,7 +183,6 @@ object YtdlpHelper {
                 org.json.JSONArray()
             }
 
-            data class Raw(val title: String, val videoId: String, val url: String, val durationMs: Long)
             val raw = ArrayList<Raw>(entries.length())
             for (i in 0 until entries.length()) {
                 val e = entries.optJSONObject(i) ?: continue
@@ -135,24 +190,10 @@ object YtdlpHelper {
                 if (videoId.isBlank()) continue
                 val durationMs = if (e.has("duration") && !e.isNull("duration")) {
                     (e.optDouble("duration", -1.0) * 1000).toLong()
-                } else -1L
-                raw += Raw(
-                    title = e.optString("title"),
-                    videoId = videoId,
-                    url = "https://www.youtube.com/watch?v=$videoId",
-                    durationMs = durationMs
-                )
+                } else null
+                raw += Raw(videoId, e.optString("title"), durationMs)
             }
-
-            val cap = limit.coerceAtMost(10)
-            raw
-                .filter { it.durationMs in MIN_DURATION_MS..MAX_DURATION_MS }
-                .filter { r -> SEARCH_JUNK.none { r.title.contains(it, ignoreCase = true) } }
-                .sortedByDescending { r ->
-                    if (SEARCH_PREFERRED.any { r.title.contains(it, ignoreCase = true) }) 1 else 0
-                }
-                .take(cap)
-                .map { SearchResult(title = it.title, videoId = it.videoId, url = it.url) }
+            scoreResults(raw, limit)
         }
 
     suspend fun extractAudioUrlForId(context: Context, videoId: String): String? =

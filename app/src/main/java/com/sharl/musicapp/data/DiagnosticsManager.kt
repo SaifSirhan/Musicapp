@@ -19,6 +19,7 @@ object DiagnosticsManager {
         val lastCacheHit: Event? = null,
         val cacheHits: Int = 0,
         val prefetch: Event? = null,
+        val lastSearch: Event? = null,
         val recent: List<Event> = emptyList()
     )
 
@@ -46,6 +47,11 @@ object DiagnosticsManager {
 
     fun recordPrefetch(text: String) {
         push("Prefetch: $text") { it.copy(prefetch = Event(now(), text)) }
+    }
+
+    fun recordSearch(success: Boolean, elapsedMs: Long, detail: String) {
+        val text = if (success) "${elapsedMs}ms · $detail" else "Failed: $detail"
+        push("Search: $text") { it.copy(lastSearch = Event(now(), text)) }
     }
 
     fun reset() {
@@ -76,6 +82,8 @@ object DiagnosticsManager {
             ?: "Last cache hit: none")
         sb.appendLine(s.prefetch?.let { "Prefetch: ${it.text} (${formatAgo(it.at)})" }
             ?: "Prefetch: idle")
+        sb.appendLine(s.lastSearch?.let { "Search: ${it.text} (${formatAgo(it.at)})" }
+            ?: "Search: no search yet")
         sb.appendLine()
         sb.appendLine("Timeline (newest first):")
         s.recent.forEach { sb.appendLine("${formatAgo(it.at).padStart(10)}  ${it.text}") }
