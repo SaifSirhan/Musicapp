@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -32,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.sharl.musicapp.AlbumResult
 import com.sharl.musicapp.QueueItem
 import com.sharl.musicapp.SearchResult
 import com.sharl.musicapp.YtdlpHelper
@@ -50,11 +50,17 @@ fun ArtistScreen(
     onPlay: (List<QueueItem>, Int) -> Unit,
     onDownload: (String, String, String) -> Unit, // videoId, title, artist
     downloadedIds: Set<String>,
+    onDownloadDiscography: (String) -> Unit,
     onBack: () -> Unit
 ) {
     var webResults by remember { mutableStateOf<List<SearchResult>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
-    
+    var albums by remember { mutableStateOf<List<AlbumResult>>(emptyList()) }
+    var albumsLoading by remember { mutableStateOf(false) }
+    var selectedAlbum by remember { mutableStateOf<AlbumResult?>(null) }
+    var albumTracks by remember { mutableStateOf<List<SearchResult>>(emptyList()) }
+    var albumTracksLoading by remember { mutableStateOf(false) }
+
     LaunchedEffect(artistName) {
         if (artistName.isBlank()) return@LaunchedEffect
         isLoading = true
@@ -69,7 +75,140 @@ fun ArtistScreen(
             isLoading = false
         }
     }
-    
+
+    LaunchedEffect(artistName) {
+        if (artistName.isBlank()) return@LaunchedEffect
+        albumsLoading = true
+        albums = YtdlpHelper.searchAlbums(context, artistName)
+        albumsLoading = false
+    }
+
+    LaunchedEffect(selectedAlbum) {
+        val album = selectedAlbum ?: return@LaunchedEffect
+        albumTracksLoading = true
+        albumTracks = YtdlpHelper.searchYouTube(
+            context,
+            YtdlpHelper.albumTrackQuery(artistName, album.title),
+            limit = 20
+        )
+        if (albumTracks.isEmpty()) {
+            // Some album titles are too noisy to find individual tracks.
+            albumTracks = YtdlpHelper.searchYouTube(context, "$artistName songs", limit = 20)
+        }
+        albumTracksLoading = false
+    }
+
+    val album = selectedAlbum
+    if (album != null) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { selectedAlbum = null; albumTracks = emptyList() }) {
+                    Text("←", style = MaterialTheme.typography.headlineSmall)
+                }
+                Spacer(Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        album.title,
+                        style = MaterialTheme.typography.titleLarge,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        artistName,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            HorizontalDivider()
+            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                item {
+                    val downloadable = albumTracks.filter { it.videoId !in downloadedIds }
+                    val allDownloaded = albumTracks.isNotEmpty() && downloadable.isEmpty()
+                    Button(
+                        onClick = {
+                            downloadable.forEach { t ->
+                                onDownload(t.videoId, t.title, artistName)
+                            }
+                        },
+                        enabled = downloadable.isNotEmpty(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        Text(
+                            when {
+                                albumTracks.isEmpty() -> "Download Album"
+                                allDownloaded -> "Album downloaded"
+                                else -> "Download Album (${downloadable.size})"
+                            }
+                        )
+                    }
+                }
+                if (albumTracksLoading) {
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(32.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator()
+                        }
+                    }
+                } else {
+                    items(albumTracks, key = { it.videoId }) { result ->
+                        val isDownloaded = result.videoId in downloadedIds
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp, horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Thumbnail(youtubeThumb(result.videoId), 48.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                result.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (isDownloaded) {
+                                Text("✓", color = MaterialTheme.colorScheme.primary)
+                            } else {
+                                IconButton(
+                                    onClick = {
+                                        onDownload(result.videoId, result.title, artistName)
+                                    }
+                                ) {
+                                    Text("⬇", style = MaterialTheme.typography.titleLarge)
+                                }
+                            }
+                        }
+                        HorizontalDivider()
+                    }
+                }
+                if (!albumTracksLoading && albumTracks.isEmpty()) {
+                    item {
+                        Text(
+                            "No tracks found for this album.",
+                            modifier = Modifier.padding(32.dp),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
+                item { Spacer(Modifier.height(96.dp)) }
+            }
+        }
+        return
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         // Header
         Row(
@@ -88,10 +227,22 @@ fun ArtistScreen(
                 modifier = Modifier.weight(1f)
             )
         }
-        
+
         HorizontalDivider()
-        
+
         LazyColumn(modifier = Modifier.fillMaxSize()) {
+            // Phase 47: prominent bulk download of the artist's whole catalogue.
+            item {
+                Button(
+                    onClick = { onDownloadDiscography(artistName) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, top = 12.dp)
+                ) {
+                    Text("⬇  Download Discography")
+                }
+            }
+
             // Local Songs Section
             if (localSongs.isNotEmpty()) {
                 item {
@@ -103,8 +254,8 @@ fun ArtistScreen(
                         Spacer(Modifier.height(8.dp))
                         Button(
                             onClick = {
-                                val items = localSongs.map { 
-                                    QueueItem(it.videoId, it.title, it.artist) 
+                                val items = localSongs.map {
+                                    QueueItem(it.videoId, it.title, it.artist)
                                 }
                                 onPlay(items, 0)
                             },
@@ -114,7 +265,7 @@ fun ArtistScreen(
                         }
                     }
                 }
-                
+
                 items(localSongs, key = { it.videoId }) { song ->
                     Row(
                         modifier = Modifier
@@ -146,7 +297,66 @@ fun ArtistScreen(
                     HorizontalDivider()
                 }
             }
-            
+
+            // Discography Section
+            if (albumsLoading) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                }
+            } else if (albums.isNotEmpty()) {
+                item {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "Discography (${albums.size})",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Tap an album to see its tracklist",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                items(albums.chunked(3)) { rowAlbums ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        rowAlbums.forEach { a ->
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { selectedAlbum = a }
+                                    .padding(8.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Thumbnail(a.thumbnailUrl ?: youtubeThumb(a.videoId), 72.dp)
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    a.title,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        repeat(3 - rowAlbums.size) {
+                            Spacer(Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+
             // Discovery Section
             item {
                 Column(modifier = Modifier.padding(16.dp)) {
@@ -157,7 +367,7 @@ fun ArtistScreen(
                     )
                 }
             }
-            
+
             if (isLoading) {
                 item {
                     Box(
@@ -204,7 +414,7 @@ fun ArtistScreen(
                     HorizontalDivider()
                 }
             }
-            
+
             if (webResults.isEmpty() && !isLoading && localSongs.isEmpty()) {
                 item {
                     Text(
@@ -214,7 +424,7 @@ fun ArtistScreen(
                     )
                 }
             }
-            
+
             item { Spacer(Modifier.height(96.dp)) }
         }
     }

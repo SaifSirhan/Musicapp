@@ -121,7 +121,11 @@ fun NowPlayingScreen(
     onToggleFavorite: () -> Unit = {},
     onAddToPlaylist: () -> Unit = {},
     onShare: () -> Unit = {},
-    onDownload: () -> Unit = {}
+    onDownload: () -> Unit = {},
+    isFavorite: Boolean = false,
+    isDownloaded: Boolean = false,
+    downloadedIds: Set<String> = emptySet(),
+    onDownloadTrack: (QueueItem) -> Unit = {}
 ) {
     val displayTitle = sanitizeTitle(title)
     val displayArtist = artist.trim().ifBlank { "Unknown Artist" }
@@ -480,6 +484,15 @@ fun NowPlayingScreen(
                                         MaterialTheme.colorScheme.onSurface,
                                     modifier = Modifier.weight(1f)
                                 )
+                                if (!downloadedIds.contains(item.videoId)) {
+                                    IconButton(onClick = { onDownloadTrack(item) }) {
+                                        Text(
+                                            "⬇",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
                             }
                             if (idx < queue.size - 1) {
                                 HorizontalDivider(
@@ -552,13 +565,13 @@ fun NowPlayingScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
         ) {
             ActionPillButton(
-                icon = "⬇",
-                label = "Download",
+                icon = if (isDownloaded) "🗑" else "⬇",
+                label = if (isDownloaded) "Remove" else "Download",
                 onClick = onDownload
             )
             ActionPillButton(
-                icon = "♡",
-                label = "Favourite",
+                icon = if (isFavorite) "♥" else "♡",
+                label = if (isFavorite) "Favourited" else "Favourite",
                 onClick = onToggleFavorite
             )
             ActionPillButton(

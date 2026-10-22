@@ -1,14 +1,6 @@
 package com.sharl.musicapp.ui.screens
 
-import android.app.Activity
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,7 +12,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -32,8 +23,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalClipboard
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -46,9 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.google.android.gms.auth.api.identity.Identity
 import com.sharl.musicapp.ImportService
-import com.sharl.musicapp.data.AuthRepository
 import com.sharl.musicapp.data.SettingsRepo
 import com.sharl.musicapp.data.SpotifyImporter
 import com.sharl.musicapp.data.YtmImporter
@@ -90,47 +77,7 @@ fun ImportAccountScreen(
     var localError by remember { mutableStateOf<String?>(null) }
     val selected = remember { mutableStateMapOf<String, Boolean>() }
 
-    // Device flow state
-    var showDeviceCodeDialog by remember { mutableStateOf(false) }
-    var deviceCodeInfo by remember { mutableStateOf<YtmImporter.DeviceCodeResponse?>(null) }
-
     val running = importState is ImportState.Running
-
-    fun applyYtmToken(token: String?) {
-        if (token.isNullOrBlank()) {
-            localError = "Google returned no access token."
-            return
-        }
-        settings.googleAccessToken = token
-        ytmToken = token
-        localError = null
-    }
-
-    val authRepo = remember { AuthRepository() }
-    val ytmConnecting by YtmImporter.connecting.collectAsState()
-    val ytmError by YtmImporter.error.collectAsState()
-
-    fun connectYoutube() {
-        localError = null
-        YtmImporter.clearError()
-        scope.launch {
-            try {
-                val deviceInfo = YtmImporter.startDeviceFlow()
-                deviceCodeInfo = deviceInfo
-                showDeviceCodeDialog = true
-
-                // Start polling for token in background
-                val token = YtmImporter.pollForToken(deviceInfo.deviceCode)
-                applyYtmToken(token)
-                showDeviceCodeDialog = false
-                deviceCodeInfo = null
-            } catch (e: Exception) {
-                localError = e.message ?: "Device flow failed"
-                showDeviceCodeDialog = false
-                deviceCodeInfo = null
-            }
-        }
-    }
 
     fun disconnectYoutube() {
         localError = null
@@ -369,24 +316,16 @@ fun ImportAccountScreen(
 
         SettingsSectionHeader("YouTube Music")
         if (ytmToken == null) {
-            if (!signedIn) {
-                Text(
-                    "Sign in with Google first, then connect YouTube Music.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            Button(onClick = { connectYoutube() }, enabled = !ytmConnecting) {
-                Text(if (ytmConnecting) "Waiting for Google…" else "Connect YouTube Music")
-            }
+            // Account import is temporarily unavailable: Google rejects the
+            // TVHTML5 device-flow client with restricted_client. Link import
+            // (Import → paste a link) does not need OAuth and stays available.
             Text(
-                "Opens your browser so you can pick or type any Google account.",
+                "YouTube account import is temporarily unavailable. Use " +
+                    "\"Import a link\" to paste a YouTube or Spotify playlist URL instead.",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp)
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            (localError ?: ytmError)?.let {
+            (localError)?.let {
                 Text(
                     it,
                     style = MaterialTheme.typography.bodySmall,
@@ -459,84 +398,6 @@ fun ImportAccountScreen(
         OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
             Text("Back")
         }
-    }
-
-    // Device flow authorization dialog
-    if (showDeviceCodeDialog && deviceCodeInfo != null) {
-        val clipboardManager = LocalClipboard.current
-        val appContext = context.applicationContext
-
-        AlertDialog(
-            onDismissRequest = {
-                showDeviceCodeDialog = false
-                deviceCodeInfo = null
-            },
-            title = { Text("Authorize YouTube Music") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    // Clickable URL
-                    Text(
-                        "1. Go to ",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Text(
-                        text = deviceCodeInfo!!.verificationUrl,
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            color = MaterialTheme.colorScheme.primary
-                        ),
-                        modifier = Modifier.clickable {
-                            val intent = android.content.Intent(
-                                android.content.Intent.ACTION_VIEW,
-                                android.net.Uri.parse(deviceCodeInfo!!.verificationUrl)
-                            )
-                            context.startActivity(intent)
-                        }
-                    )
-                    
-                    Spacer(Modifier.height(4.dp))
-                    
-                    // User code with copy button
-                    Text(
-                        "2. Enter this code:",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            deviceCodeInfo!!.userCode,
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        IconButton(onClick = {
-                            val clipboard = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            val clip = ClipData.newPlainText("YouTube Code", deviceCodeInfo!!.userCode)
-                            clipboard.setPrimaryClip(clip)
-                        }) {
-                            Text("📋", style = MaterialTheme.typography.bodyLarge)
-                        }
-                    }
-                    
-                    Spacer(Modifier.height(4.dp))
-                    
-                    Text(
-                        "Waiting for authorization...",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    showDeviceCodeDialog = false
-                    deviceCodeInfo = null
-                }) {
-                    Text("Cancel")
-                }
-            }
-        )
     }
 }
 

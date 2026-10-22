@@ -491,8 +491,53 @@ fun PlayerScreen(
         }
     }
 
-    fun removeAllDownloads() {
-        val items = downloads
+    // Phase 47: find the artist's albums and download every track we can.
+    fun downloadDiscography(artist: String) {
+        if (artist.isBlank()) return
+        scope.launch {
+            status = "Looking up $artist's albums..."
+            var downloaded = 0
+            var failed = 0
+            try {
+                val albums = YtdlpHelper.searchAlbums(context, artist, limit = 8)
+                if (albums.isEmpty()) {
+                    status = "No albums found for $artist"
+                    return@launch
+                }
+                albums.forEachIndexed { albumIdx, album ->
+                    status = "Discography ${albumIdx + 1}/${albums.size}: ${album.title}"
+                    val tracks = YtdlpHelper.searchYouTube(
+                        context,
+                        YtdlpHelper.albumTrackQuery(artist, album.title),
+                        limit = 12
+                    )
+                    tracks.filter { it.videoId !in downloadIds }.forEach { t ->
+                        try {
+                            Downloader.downloadSimple(
+                                context,
+                                settings,
+                                t.videoId,
+                                t.title,
+                                artist,
+                                youtubeThumb(t.videoId)
+                            )
+                            downloaded++
+                        } catch (e: Exception) {
+                            failed++
+                            Log.w("DISC", "discography download failed for ${t.videoId}", e)
+                        }
+                    }
+                }
+                status = "Discography done: $downloaded downloaded" +
+                    if (failed > 0) ", $failed failed" else ""
+            } catch (e: Exception) {
+                Log.e("DISC", "discography failed for $artist", e)
+                status = "Discography failed: ${e.message}"
+            }
+        }
+    }
+
+    fun removeAllDownloads() {        val items = downloads
         scope.launch {
             val showProgress = items.size > 5
             items.forEachIndexed { idx, d ->
@@ -1558,7 +1603,9 @@ fun PlayerScreen(
             }
             ArtistScreen(
                 artistName = artistScreenName!!,
-                localSongs = emptyList(), // TODO: Query from database by artist name
+                localSongs = allSongs.filter {
+                    it.artist.equals(artistScreenName, ignoreCase = true)
+                },
                 context = context,
                 scope = scope,
                 onPlay = { items, index -> playFromQueue(items, index) },
@@ -1578,6 +1625,7 @@ fun PlayerScreen(
                     }
                 },
                 downloadedIds = downloadIds.toSet(),
+                onDownloadDiscography = { name -> downloadDiscography(name) },
                 onBack = { artistScreenName = null }
             )
         } else if (showPlaylists) {
@@ -1615,6 +1663,19 @@ fun PlayerScreen(
             androidx.activity.compose.BackHandler(enabled = true) {
                 showNowPlaying = false
             }
+            val currentTrack = queue.getOrNull(queueIndex)
+            val currentVideoId = currentTrack?.videoId
+            val currentSong = allSongs.firstOrNull { it.videoId == currentVideoId }
+                ?: currentTrack?.let {
+                    Song(
+                        videoId = it.videoId,
+                        title = nowPlayingTitle ?: it.title,
+                        artist = nowPlayingArtist ?: it.artist,
+                        thumbnailUrl = nowPlayingThumbnail,
+                        lastPlayedAt = 0L,
+                        playCount = 0
+                    )
+                }
             NowPlayingScreen(
                 title = nowPlayingTitle ?: "",
                 artist = nowPlayingArtist ?: "",
@@ -1708,6 +1769,54 @@ fun PlayerScreen(
                     controller?.repeatMode = when (repeatMode) {
                         2 -> androidx.media3.common.Player.REPEAT_MODE_ONE
                         else -> androidx.media3.common.Player.REPEAT_MODE_OFF
+                    }
+                },
+                isFavorite = currentSong?.isFavorite == true,
+                isDownloaded = currentVideoId != null && downloadIds.contains(currentVideoId),
+                downloadedIds = downloadIds.toSet(),
+                onDownloadTrack = { q ->
+                    startDownload(q.videoId, q.title, q.artist, null, 0L)
+                },
+                onToggleFavorite = {
+                    currentSong?.let { song ->
+                        scope.launch { repo.toggleFavorite(song) }
+                    }
+                },
+                onAddToPlaylist = {
+                    currentSong?.let { showAddToPlaylist = it }
+                },
+                onDownload = {
+                    val vid = currentVideoId
+                    if (vid != null) {
+                        if (downloadIds.contains(vid)) {
+                            scope.launch {
+                                downloadRepo.get(vid)?.let { Downloader.remove(context, it) }
+                                status = "Removed download"
+                            }
+                        } else {
+                            startDownload(
+                                vid,
+                                nowPlayingTitle ?: currentTrack?.title ?: "",
+                                nowPlayingArtist ?: currentTrack?.artist ?: "",
+                                nowPlayingThumbnail,
+                                0L
+                            )
+                        }
+                    }
+                },
+                onShare = {
+                    val vid = currentVideoId
+                    if (vid != null) {
+                        val share = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(
+                                Intent.EXTRA_TEXT,
+                                "https://www.youtube.com/watch?v=$vid"
+                            )
+                        }
+                        context.startActivity(
+                            Intent.createChooser(share, "Share song")
+                        )
                     }
                 }
             )
@@ -2115,6 +2224,7 @@ fun PlayerScreen(
                     favorites = favorites,
                     onToggleFavorite = { song -> scope.launch { repo.toggleFavorite(song) } },
                     onSongMenu = { menuSong = it },
+                    onDownloadDiscography = { name -> downloadDiscography(name) },
                     downloadIds = downloadIds,
                     loadingVideoId = loadingVideoId,
                     onPreExtract = { id -> preExtract(id) },

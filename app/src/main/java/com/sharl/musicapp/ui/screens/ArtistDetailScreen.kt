@@ -40,7 +40,8 @@ fun ArtistDetailScreen(
     onBack: () -> Unit,
     onPlayAll: (List<Song>) -> Unit,
     onSongClick: (Song) -> Unit,
-    onSongMenu: (Song) -> Unit
+    onSongMenu: (Song) -> Unit,
+    onDownloadDiscography: (String) -> Unit
 ) {
     val songs by songDao.getSongsByArtist(artistName).collectAsState(initial = emptyList())
 
@@ -72,6 +73,16 @@ fun ArtistDetailScreen(
                 ) {
                     Text("Play All (${songs.size} songs)")
                 }
+            }
+
+            // Phase 47: bulk download the artist's whole catalogue.
+            Button(
+                onClick = { onDownloadDiscography(artistName) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+            ) {
+                Text("⬇  Download Discography")
             }
 
             // Songs list

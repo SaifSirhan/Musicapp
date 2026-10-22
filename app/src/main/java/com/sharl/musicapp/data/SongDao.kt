@@ -76,6 +76,9 @@ interface SongDao {
     @Query("SELECT * FROM songs WHERE isHidden = 0 AND artist = :artist ORDER BY RANDOM() LIMIT :limit")
     suspend fun randomSongsByArtist(artist: String, limit: Int): List<Song>
 
+    @Query("SELECT * FROM songs WHERE isHidden = 0 AND videoId != :exclude ORDER BY RANDOM() LIMIT :limit")
+    suspend fun randomSongs(limit: Int, exclude: String): List<Song>
+
     @Query("SELECT videoId FROM songs WHERE isHidden = 1")
     suspend fun hiddenIds(): List<String>
 

@@ -82,6 +82,7 @@ fun ColumnScope.LibraryTab(
     favorites: List<Song>,
     onToggleFavorite: (Song) -> Unit,
     onSongMenu: (Song) -> Unit,
+    onDownloadDiscography: (String) -> Unit,
     downloadIds: List<String>,
     loadingVideoId: String?,
     onPreExtract: suspend (String) -> Unit,
@@ -191,7 +192,8 @@ fun ColumnScope.LibraryTab(
                                 0
                             )
                         },
-                        onSongMenu = onSongMenu
+                        onSongMenu = onSongMenu,
+                        onDownloadDiscography = onDownloadDiscography
                     )
                 } else {
                     // Show artists grid

@@ -22,6 +22,12 @@ data class SongMetadata(
     val thumbnailUrl: String?
 )
 
+data class AlbumResult(
+    val title: String,
+    val videoId: String,
+    val thumbnailUrl: String?
+)
+
 object YtdlpHelper {
 
     @Volatile
@@ -188,6 +194,95 @@ object YtdlpHelper {
             }
             scoreResults(raw, limit)
         }
+
+    // Album uploads legitimately carry "full album" in the title, so they get a
+    // narrower junk list than track search.
+    private val ALBUM_JUNK = listOf(
+        "mix", "playlist", "livestream", "podcast", "1 hour", "10 hours"
+    )
+
+    // Phase 47: album discovery for the artist discography section. YouTube
+    // "full album" uploads are the most reliable public source of an artist's
+    // album list, so we search for those and clean the titles down to names.
+    suspend fun searchAlbums(
+        context: Context,
+        artist: String,
+        limit: Int = 10
+    ): List<AlbumResult> = withContext(Dispatchers.IO) {
+        try {
+            ensureInitialized(context)
+            val request = YoutubeDLRequest("ytsearch20:$artist full album").apply {
+                addOption("--flat-playlist")
+                addOption("--dump-single-json")
+                addOption("--no-update")
+                addOption("--no-warnings")
+            }
+            val response = YoutubeDL.getInstance().execute(request)
+            val start = response.out.indexOf('{')
+            val root = org.json.JSONObject(response.out.substring(start.coerceAtLeast(0)))
+            val entries = root.optJSONArray("entries") ?: org.json.JSONArray()
+
+            val artistLower = artist.lowercase()
+            val seen = HashSet<String>()
+            val albums = ArrayList<AlbumResult>()
+
+            for (i in 0 until entries.length()) {
+                val e = entries.optJSONObject(i) ?: continue
+                val videoId = e.optString("id").ifBlank { e.optString("url") }
+                if (videoId.isBlank()) continue
+                val raw = e.optString("title")
+                if (raw.isBlank()) continue
+                if (ALBUM_JUNK.any { raw.contains(it, ignoreCase = true) }) continue
+                val name = cleanAlbumTitle(raw, artist)
+                if (name.isBlank() || !seen.add(name.lowercase())) continue
+
+                val thumbnail = e.optJSONArray("thumbnails")?.let { arr ->
+                    val last = arr.optJSONObject(arr.length() - 1)
+                    last?.optString("url")?.takeIf { it.isNotBlank() }
+                } ?: e.optString("thumbnail").takeIf { it.isNotBlank() }
+
+                albums += AlbumResult(name, videoId, thumbnail)
+                if (albums.size >= limit) break
+            }
+            Log.d("ARTIST", "Albums for '$artist': ${albums.map { it.title }}")
+            albums
+        } catch (e: Exception) {
+            Log.e("ARTIST", "Album search failed for '$artist': ${e.message}", e)
+            emptyList()
+        }
+    }
+
+    // "Full album" upload titles make YouTube return more full albums instead of
+    // individual tracks, so strip those words from the tracklist search.
+    fun albumTrackQuery(artist: String, albumTitle: String): String {
+        val cleaned = Regex("(?i)full album|official|album|audio|video")
+            .replace(albumTitle, " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        return "$artist $cleaned".trim()
+    }
+
+    private fun cleanAlbumTitle(raw: String, artist: String): String {        var t = raw
+        // Drop a leading "<artist> - ".
+        val prefix = "$artist - "
+        if (t.startsWith(prefix, ignoreCase = true)) t = t.substring(prefix.length)
+        val suffixes = listOf(
+            " (full album)", " - full album", " full album",
+            " (official album)", " - official album",
+            " (album)", " - album"
+        )
+        var changed = true
+        while (changed) {
+            changed = false
+            for (s in suffixes) {
+                if (t.endsWith(s, ignoreCase = true)) {
+                    t = t.dropLast(s.length)
+                    changed = true
+                }
+            }
+        }
+        return t.trim().trim('-', ':', '|').trim()
+    }
 
     suspend fun extractAudioUrlForId(context: Context, videoId: String): String? =
         extractAudioUrl(context, "https://www.youtube.com/watch?v=$videoId")
