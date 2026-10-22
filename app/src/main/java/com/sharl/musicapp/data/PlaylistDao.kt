@@ -24,6 +24,39 @@ interface PlaylistDao {
     @Query("DELETE FROM playlists")
     suspend fun clearAllPlaylists()
 
+    // Phase 44: New CrossRef-based queries
+    @Query("DELETE FROM playlist_song_cross_ref")
+    suspend fun clearAllCrossRefs()
+
+    @Query("DELETE FROM playlist_song_cross_ref WHERE playlistId = :id")
+    suspend fun clearCrossRefsForPlaylist(id: Long)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun addSongToPlaylist(ref: PlaylistSongCrossRef): Long
+
+    @Query("DELETE FROM playlist_song_cross_ref WHERE playlistId = :playlistId AND videoId = :videoId")
+    suspend fun removeSongFromPlaylist(playlistId: Long, videoId: String)
+
+    /**
+     * Phase 44: Get songs in a playlist via CrossRef, joining with Song table.
+     * Returns full Song objects ordered by position.
+     */
+    @Transaction
+    @Query("""
+        SELECT s.* FROM songs s 
+        INNER JOIN playlist_song_cross_ref ps ON s.videoId = ps.videoId 
+        WHERE ps.playlistId = :playlistId 
+        ORDER BY ps.position ASC
+    """)
+    fun songsInPlaylistNew(playlistId: Long): Flow<List<Song>>
+
+    /**
+     * Legacy: Keep using old PlaylistSong table for backward compatibility.
+     * TODO: Migrate all callers to songsInPlaylistNew() and remove this.
+     */
+    @Query("SELECT * FROM playlist_songs WHERE playlistId = :playlistId ORDER BY addedAt DESC")
+    fun songsInPlaylist(playlistId: Long): Flow<List<PlaylistSong>>
+
     @Query("DELETE FROM playlist_songs")
     suspend fun clearAllPlaylistSongs()
 
@@ -36,11 +69,14 @@ interface PlaylistDao {
     @Query("DELETE FROM playlist_songs WHERE playlistId = :playlistId AND videoId = :videoId")
     suspend fun removeSong(playlistId: Long, videoId: String)
 
-    @Query("SELECT * FROM playlist_songs WHERE playlistId = :playlistId ORDER BY addedAt DESC")
-    fun songsInPlaylist(playlistId: Long): Flow<List<PlaylistSong>>
-
     @Query("SELECT COUNT(*) FROM playlist_songs WHERE playlistId = :playlistId")
     suspend fun countSongs(playlistId: Long): Int
+
+    /**
+     * Phase 44: Count songs via CrossRef
+     */
+    @Query("SELECT COUNT(*) FROM playlist_song_cross_ref WHERE playlistId = :playlistId")
+    suspend fun countSongsNew(playlistId: Long): Int
 
     /**
      * Atomically wipe every playlist and every playlist_songs row so that no
@@ -49,6 +85,7 @@ interface PlaylistDao {
      */
     @Transaction
     suspend fun clearAll() {
+        clearAllCrossRefs()
         clearAllPlaylistSongs()
         clearAllPlaylists()
     }
@@ -60,6 +97,7 @@ interface PlaylistDao {
      */
     @Transaction
     suspend fun deletePlaylistWithSongs(id: Long) {
+        clearCrossRefsForPlaylist(id)
         clearPlaylistSongs(id)
         deletePlaylist(id)
     }

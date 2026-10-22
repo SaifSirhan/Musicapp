@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [Song::class, Playlist::class, PlaylistSong::class, SpeedDialSlot::class, Download::class, LocalMedia::class],
-    version = 10,
+    entities = [Song::class, Playlist::class, PlaylistSong::class, PlaylistSongCrossRef::class, SpeedDialSlot::class, Download::class, LocalMedia::class],
+    version = 11,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -36,6 +36,23 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        // Phase 44: Add PlaylistSongCrossRef junction table for Many-to-Many
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `playlist_song_cross_ref` (" +
+                        "`playlistId` INTEGER NOT NULL, " +
+                        "`videoId` TEXT NOT NULL, " +
+                        "`position` INTEGER NOT NULL DEFAULT 0, " +
+                        "`addedAt` INTEGER NOT NULL DEFAULT 0, " +
+                        "PRIMARY KEY(`playlistId`, `videoId`), " +
+                        "FOREIGN KEY(`playlistId`) REFERENCES `playlists`(`id`) ON DELETE CASCADE, " +
+                        "FOREIGN KEY(`videoId`) REFERENCES `songs`(`videoId`) ON DELETE CASCADE)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_playlist_song_cross_ref_videoId` ON `playlist_song_cross_ref` (`videoId`)")
+            }
+        }
+
         fun get(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -43,7 +60,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "musicapp.db"
                 )
-                    .addMigrations(MIGRATION_9_10)
+                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }
