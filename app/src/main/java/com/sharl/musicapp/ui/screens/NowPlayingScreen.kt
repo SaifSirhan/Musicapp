@@ -116,7 +116,12 @@ fun NowPlayingScreen(
     onNotInterested: () -> Unit = {},
     onArtistClick: () -> Unit = {},
     onShuffleToggle: () -> Unit,
-    onRepeatToggle: () -> Unit
+    onRepeatToggle: () -> Unit,
+    // Action button callbacks
+    onToggleFavorite: () -> Unit = {},
+    onAddToPlaylist: () -> Unit = {},
+    onShare: () -> Unit = {},
+    onDownload: () -> Unit = {}
 ) {
     val displayTitle = sanitizeTitle(title)
     val displayArtist = artist.trim().ifBlank { "Unknown Artist" }
@@ -549,22 +554,22 @@ fun NowPlayingScreen(
             ActionPillButton(
                 icon = "⬇",
                 label = "Download",
-                onClick = { /* TODO: wire download */ }
+                onClick = onDownload
             )
             ActionPillButton(
                 icon = "♡",
                 label = "Favourite",
-                onClick = { /* TODO: wire favorite */ }
+                onClick = onToggleFavorite
             )
             ActionPillButton(
                 icon = "➕",
                 label = "Playlist",
-                onClick = { /* TODO: wire add to playlist */ }
+                onClick = onAddToPlaylist
             )
             ActionPillButton(
                 icon = "↗",
                 label = "Share",
-                onClick = { /* TODO: wire share */ }
+                onClick = onShare
             )
         }
 

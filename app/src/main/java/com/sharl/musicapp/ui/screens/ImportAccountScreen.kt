@@ -110,8 +110,10 @@ fun ImportAccountScreen(
     fun connectYoutube() {
         localError = null
         YtmImporter.clearError()
-        if (!YtmImporter.authorize(context)) {
-            localError = YtmImporter.error.value ?: "Could not start Google sign-in."
+        scope.launch {
+            if (!YtmImporter.authorize(context)) {
+                localError = YtmImporter.error.value ?: "Could not start Google sign-in."
+            }
         }
     }
 

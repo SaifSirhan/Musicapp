@@ -105,33 +105,48 @@ fun ColumnScope.SearchTab(
         )
     }
 
+    // Track the current search job so we can cancel stale queries
+    val currentSearchJob = androidx.compose.runtime.mutableStateOf<kotlinx.coroutines.Job?>(null)
+
     LaunchedEffect(query) {
         val trimmed = query.trim()
         if (trimmed.isBlank()) {
             onResultsChange(emptyList())
             onSearchingChange(false)
+            currentSearchJob.value?.cancel()
+            currentSearchJob.value = null
             return@LaunchedEffect
         }
         if (trimmed.length < 2) return@LaunchedEffect
+        
         kotlinx.coroutines.delay(400)
-        onSearchingChange(true)
-        try {
-            val t0 = android.os.SystemClock.elapsedRealtime()
-            // yt-dlp occasionally repeats an entry; the results list keys by
-            // videoId, and duplicate keys crash Compose.
-            val found = YtdlpHelper.searchYouTube(context, trimmed)
-                .distinctBy { it.videoId }
-            Log.d("YTDL", "search '${trimmed}' took ${android.os.SystemClock.elapsedRealtime() - t0}ms")
-            if (query.trim() == trimmed) {
-                onResultsChange(found)
-                // Warm the first result so an immediate tap is instant.
-                found.firstOrNull()?.videoId?.let { scope.launch { onPreExtract(it) } }
+        
+        // Cancel any previous search job
+        currentSearchJob.value?.cancel()
+        
+        // Launch in the provided scope (survives tab switches)
+        val job = scope.launch {
+            onSearchingChange(true)
+            try {
+                val t0 = android.os.SystemClock.elapsedRealtime()
+                // yt-dlp occasionally repeats an entry; the results list keys by
+                // videoId, and duplicate keys crash Compose.
+                val found = YtdlpHelper.searchYouTube(context, trimmed)
+                    .distinctBy { it.videoId }
+                Log.d("YTDL", "search '${trimmed}' took ${android.os.SystemClock.elapsedRealtime() - t0}ms")
+                if (query.trim() == trimmed) {
+                    onResultsChange(found)
+                    // Warm the first result so an immediate tap is instant.
+                    found.firstOrNull()?.videoId?.let { onPreExtract(it) }
+                }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.e("YTDL", "live search failed: ${e.message}")
+            } finally {
+                if (query.trim() == trimmed) onSearchingChange(false)
             }
-        } catch (e: Exception) {
-            Log.e("YTDL", "live search failed: ${e.message}")
-        } finally {
-            if (query.trim() == trimmed) onSearchingChange(false)
         }
+        currentSearchJob.value = job
     }
 
     LaunchedEffect(query) {

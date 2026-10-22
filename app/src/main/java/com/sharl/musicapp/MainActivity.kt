@@ -1121,7 +1121,8 @@ fun PlayerScreen(
                 val key = "${q.videoId}:$idx"
                 if (!recoveryAttempts.add(key)) {
                     scope.launch {
-                        snackbarHostState.showSnackbar("Streaming failed: ${error.diagnostic()}")
+                        // Don't show red error toast on repeated failures — just log
+                        Log.w("PLAYBACK", "Repeated recovery failure for ${q.videoId}: ${error.diagnostic()}")
                     }
                     return
                 }
@@ -1130,14 +1131,16 @@ fun PlayerScreen(
                 urlCache.remove(q.videoId)
                 val snapshot = queue
                 scope.launch {
-                    status = "Stream blocked — fetching fallback…"
+                    // Show loading state instead of error
+                    status = "Loading..."
                     val file = runCatching {
                         Downloader.cacheForPlayback(context, q.videoId)
                     }.getOrNull()
                     recoveringVideoId = null
                     if (file == null) {
                         status = "Streaming blocked"
-                        snackbarHostState.showSnackbar("Streaming failed: ${error.diagnostic()}")
+                        // Only show error if fallback also failed
+                        Log.e("PLAYBACK", "Fallback recovery failed for ${q.videoId}: ${error.diagnostic()}")
                         return@launch
                     }
                     Log.d("PLAYBACK", "recovered ${q.videoId} via local cache")
