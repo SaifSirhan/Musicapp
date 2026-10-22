@@ -50,7 +50,7 @@ object YtdlpHelper {
             val request = YoutubeDLRequest(videoUrl).apply {
                 addOption("-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best")
                 addOption("-g")
-                addOption("--extractor-args", "youtube:player_client=ios,tv,mweb,android_vr,web_embedded,tv_embedded")
+                addOption("--extractor-args", "youtube:player_client=ios,tv,mweb,android_vr,web_embedded,tv_embedded,android_sdkless")
                 addOption("--remote-components", "ejs:github")
                 addOption("--no-update")
                 addOption("--no-warnings")

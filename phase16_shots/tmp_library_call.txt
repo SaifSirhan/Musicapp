@@ -1,0 +1,60 @@
+            2 -> {
+                LibraryTab(
+                    context = context,
+                    scope = scope,
+                    libraryTab = libraryTab,
+                    onLibraryTabChange = { libraryTab = it },
+                    libraryLayout = libraryLayout,
+                    onLibraryLayoutChange = { libraryLayout = it },
+                    onImportClick = { importRepo.reset(); showImport = true },
+                    downloads = downloads,
+                    downloadStates = downloadStates,
+                    onRemoveAllDownloads = { showRemoveAllDownloads = true },
+                    onFindMusic = { tab = 1 },
+                    playlists = playlists,
+                    openPlaylistId = openPlaylistId,
+                    onOpenPlaylistChange = { openPlaylistId = it },
+                    playlistRepo = playlistRepo,
+                    onCreatePlaylist = { showNewPlaylistDialog = true },
+                    onRequestRename = { name ->
+                        renamePlaylistName = name
+                        showRenamePlaylist = true
+                    },
+                    onRequestDelete = { showDeletePlaylistConfirm = true },
+                    onPlaylistSongMenu = { ps ->
+                        playlistMenuSong = ps
+                        playlistMenuPlaylistId = openPlaylistId
+                    },
+                    onPlaylistMenu = { pl -> playlistListMenu = pl },
+                    favorites = favorites,
+                    onToggleFavorite = { song -> scope.launch { repo.toggleFavorite(song) } },
+                    onSongMenu = { menuSong = it },
+                    downloadIds = downloadIds,
+                    loadingVideoId = loadingVideoId,
+                    onPreExtract = { id -> preExtract(id) },
+                    onPlayFromQueue = { items, index -> playFromQueue(items, index) },
+                    friendsConfigured = authRepo.configured,
+                    signedIn = signedIn,
+                    friends = friendsList,
+                    friendsLoading = friendsLoading,
+                    friendsError = friendsError,
+                    selectedFriend = selectedFriend,
+                    selectedFriendSongs = selectedFriendSongs,
+                    selectedFriendSongsLoading = selectedFriendSongsLoading,
+                    friendsNowPlaying = friendsNowPlaying,
+                    onOpenFriend = { f ->
+                        selectedFriend = f
+                        selectedFriendSongs = emptyList()
+                        selectedFriendSongsLoading = true
+                        scope.launch {
+                            selectedFriendSongs = runCatching {
+                                val shared = friendsRepo.friendsPlaylists(listOf(f.id)).firstOrNull()
+                                if (shared?.id != null) friendsRepo.songsOf(shared.id) else emptyList()
+                            }.getOrDefault(emptyList())
+                            selectedFriendSongsLoading = false
+                        }
+                    },
+                    onFriendBack = { selectedFriend = null },
+                    onSignIn = { showSignIn = true },
+                )
+            }

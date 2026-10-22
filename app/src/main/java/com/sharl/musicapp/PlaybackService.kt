@@ -55,21 +55,13 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        // DataSource/MediaSource config with YouTube-specific headers to prevent 403.
-        // InnerTube IOS client signature that YouTube accepts for stream URLs.
-        val ytUserAgent = "com.google.ios.youtube/19.29.1 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)"
+        // Simple HTTP DataSource - let yt-dlp handle 403 fallback instead
         val httpFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
-            .setUserAgent(ytUserAgent)
+            .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(15_000)
             .setAllowCrossProtocolRedirects(true)
-            .setDefaultRequestProperties(mapOf(
-                "Origin" to "https://www.youtube.com",
-                "Referer" to "https://www.youtube.com/"
-            ))
-        val dsFactory = androidx.media3.datasource.DefaultDataSource.Factory(
-            this, httpFactory
-        )
+        val dsFactory = androidx.media3.datasource.DefaultDataSource.Factory(this, httpFactory)
         val msFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dsFactory)
 
         val exoA = ExoPlayer.Builder(this)
@@ -115,7 +107,7 @@ class PlaybackService : MediaSessionService() {
         applyPlaybackSettings()
         prefs.registerOnSharedPreferenceChangeListener(settingsListener)
 
-        Log.d("CTRL", "PlaybackService created with dual players + YouTube headers")
+        Log.d("CTRL", "PlaybackService created with simple HTTP DataSource")
     }
 
     private fun attachPlayer(player: ExoPlayer) {

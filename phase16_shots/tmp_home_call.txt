@@ -1,0 +1,24 @@
+            0 -> {
+                HomeTab(
+                    forYouTop = forYouTop,
+                    forYouRecent = forYouRecent,
+                    onPreExtract = { id -> preExtract(id) },
+                    onPlayFromQueue = { items, index -> playFromQueue(items, index) },
+                    downloadIds = downloadIds,
+                    loadingVideoId = loadingVideoId,
+                    onSongMenu = { menuSong = it },
+                    signedIn = signedIn,
+                    friendsNowPlaying = friendsNowPlaying,
+                    friendsList = friendsList,
+                    onFriendClick = { nowPlayingFriend = it },
+                    newDrops = newDrops,
+                    newDropsLoading = newDropsLoading,
+                    onSeeAllDrops = { showNewDropsAll = true },
+                    speedDialSlots = speedDialSlots,
+                    onSpeedDialTap = { slot, position -> onSpeedDialTap(slot, position) },
+                    onSpeedDialLongPress = { speedDialMenuPosition = it },
+                    topArtistName = topArtistName,
+                    forYouByArtist = forYouByArtist,
+                    forYouFavorites = forYouFavorites,
+                )
+            }

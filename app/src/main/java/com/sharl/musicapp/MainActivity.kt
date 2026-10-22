@@ -632,9 +632,7 @@ fun PlayerScreen(
         }
     }
 
-    // Triple hybrid: InnerTube first (fast, ~200ms), yt-dlp as the safety net.
-    // Metadata comes from the library row, or the queue title when the row
-    // doesn't exist yet (search-and-play inserts it only after resolution).
+    // Clean pipeline: yt-dlp only. No InnerTube attempts (they just add delay before failing).
     suspend fun resolveRemote(
         videoId: String,
         fallbackTitle: String? = null,
@@ -642,34 +640,25 @@ fun PlayerScreen(
     ): Pair<String, SongMetadata>? {
         val started = System.currentTimeMillis()
         val song = runCatching { repo.get(videoId) }.getOrNull()
-        // Never show a raw video ID as the title. Prefer library → InnerTube
-        // metadata → yt-dlp; only fall back to the ID when all three are empty.
-        val fast = InnerTubeHelper.getStreamWithMetadata(videoId, immediateUse)
-        if (fast != null) {
-            ResolutionStats.recordFast(context)
-            fastEngine = true
-            val elapsed = System.currentTimeMillis() - started
-            Log.d("RESOLVE", "InnerTube hit for $videoId in ${elapsed}ms")
-            val title = (fast.title ?: song?.title ?: fallbackTitle).orEmpty().ifBlank { videoId }
-            DiagnosticsManager.recordInnerTube(true, elapsed, InnerTubeHelper.lastClientLog)
-            return fast.url to SongMetadata(
-                title = title,
-                artist = fast.artist.ifBlank { song?.artist ?: "" },
-                album = song?.album,
-                thumbnailUrl = fast.thumbnailUrl ?: song?.thumbnailUrl ?: youtubeThumb(videoId)
-            )
-        }
-        Log.w("RESOLVE", "InnerTube failed, falling back to yt-dlp ($videoId)")
-        ResolutionStats.recordFallback(context)
-        innerTubeFailCount += 1
+        
+        Log.d("RESOLVE", "Using yt-dlp directly for $videoId (no InnerTube)")
         fastEngine = false
-        val ytdlpStarted = System.currentTimeMillis()
+        
         try {
             val result = YtdlpHelper.extractUrlAndMetadata(context, videoId)
-            DiagnosticsManager.recordYtdlp(result != null, System.currentTimeMillis() - ytdlpStarted)
-            return result
+            val elapsed = System.currentTimeMillis() - started
+            DiagnosticsManager.recordYtdlp(result != null, elapsed)
+            
+            if (result != null) {
+                Log.d("RESOLVE", "yt-dlp success for $videoId in ${elapsed}ms")
+                return result
+            } else {
+                Log.e("RESOLVE", "yt-dlp failed for $videoId")
+                return null
+            }
         } catch (e: Exception) {
-            DiagnosticsManager.recordYtdlp(false, System.currentTimeMillis() - ytdlpStarted, e.message ?: e.javaClass.simpleName)
+            DiagnosticsManager.recordYtdlp(false, System.currentTimeMillis() - started, e.message ?: e.javaClass.simpleName)
+            Log.e("RESOLVE", "yt-dlp exception for $videoId: ${e.message}")
             throw e
         }
     }
@@ -1094,58 +1083,20 @@ fun PlayerScreen(
         }
     }
 
-    // Self-healing playback. A signed CDN stream URL that returns 403 (or any
-    // other IO failure) triggers exactly one yt-dlp fallback per track: resolve
-    // to a full local download and restart the queue at that index. Previously
-    // the error only surfaced in logcat and the UI sat at 0:00 / 0:00.
+    // Clean error handling: if playback fails, show a message and stop.
+    // No auto-fallback — yt-dlp already tried during resolution.
     DisposableEffect(controller) {
         val c = controller ?: return@DisposableEffect onDispose {}
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                val code = error.errorCode
-                val ioFailure = code == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
-                    code == PlaybackException.ERROR_CODE_IO_UNSPECIFIED ||
-                    code == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
-                    code == PlaybackException.ERROR_CODE_IO_NO_PERMISSION
-                // "YouTube API blocked" used to be shown for every failure, which
-                // hid 404s and timeouts behind a 403 story. Keep the cause.
-                DiagnosticsManager.recordPlayerError(code, error.message.orEmpty())
-                if (!ioFailure || recoveringVideoId != null) return
-                // Prefer the failing MediaItem's queue tag: on a gapless
-                // transition queueIndex may not have caught up yet.
-                val tagged = c.currentMediaItem?.requestMetadata?.extras
-                    ?.getInt("queue_index", -1) ?: -1
-                val idx = if (tagged in queue.indices) tagged else queueIndex
-                val q = queue.getOrNull(idx) ?: return
-                if (q.localUri != null) return
-                val key = "${q.videoId}:$idx"
-                if (!recoveryAttempts.add(key)) {
-                    scope.launch {
-                        // Don't show red error toast on repeated failures — just log
-                        Log.w("PLAYBACK", "Repeated recovery failure for ${q.videoId}: ${error.diagnostic()}")
-                    }
-                    return
-                }
-                recoveringVideoId = q.videoId
-                PlaybackCache.remove(q.videoId)
-                urlCache.remove(q.videoId)
-                val snapshot = queue
+                DiagnosticsManager.recordPlayerError(error.errorCode, error.message.orEmpty())
+                
                 scope.launch {
-                    // Show loading state instead of error
-                    status = "Loading..."
-                    val file = runCatching {
-                        Downloader.cacheForPlayback(context, q.videoId)
-                    }.getOrNull()
-                    recoveringVideoId = null
-                    if (file == null) {
-                        status = "Streaming blocked"
-                        // Only show error if fallback also failed
-                        Log.e("PLAYBACK", "Fallback recovery failed for ${q.videoId}: ${error.diagnostic()}")
-                        return@launch
-                    }
-                    Log.d("PLAYBACK", "recovered ${q.videoId} via local cache")
-                    playFromQueue(snapshot, idx)
+                    snackbarHostState.showSnackbar("Playback failed. Try another song.")
                 }
+                
+                c.stop()
+                c.clearMediaItems()
             }
         }
         c.addListener(listener)

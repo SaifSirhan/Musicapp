@@ -1,0 +1,7 @@
+Phase 16: polish pass — regression verify, gapless repeat-all, tab extraction
+
+- Verify B1-B5, D1-D2 post-refactor on emulator (report attached)
+- Fix repeat-all windowing: wrap to full queue at end, not window edge
+- Extract Home/Search/Library tabs out of PlayerScreen (~1500 → 0 inline)
+- Now-playing "last seen" copy, shared playlist snapshot note, storage label
+- Remove orphaned imports from MainActivity refactor

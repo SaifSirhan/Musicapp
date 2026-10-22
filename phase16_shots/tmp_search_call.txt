@@ -1,0 +1,21 @@
+            1 -> {
+                SearchTab(
+                    context = context,
+                    query = query,
+                    onQueryChange = { query = it },
+                    results = results,
+                    onResultsChange = { results = it },
+                    isSearching = isSearching,
+                    onSearchingChange = { isSearching = it },
+                    localMatches = localMatches,
+                    onLocalMatchesChange = { localMatches = it },
+                    onSearchLocal = { q -> repo.searchLocal(q) },
+                    onPreExtract = { id -> preExtract(id) },
+                    scope = scope,
+                    onPlayFromQueue = { items, index -> playFromQueue(items, index) },
+                    onToggleFavorite = { song -> scope.launch { repo.toggleFavorite(song) } },
+                    onSongMenu = { menuSong = it },
+                    downloadIds = downloadIds,
+                    loadingVideoId = loadingVideoId,
+                )
+            }
