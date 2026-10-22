@@ -86,6 +86,8 @@ fun SettingsScreen(
     onCrossfadeSecondsChange: (Int) -> Unit = {},
     normalizeVolume: Boolean = false,
     onNormalizeVolumeChange: (Boolean) -> Unit = {},
+    deezerArlToken: String = "",
+    onConfigureDeezer: () -> Unit = {},
     friends: List<Profile> = emptyList(),
     addFriendCode: String = "",
     onAddFriendCodeChange: (String) -> Unit = {},
@@ -515,6 +517,49 @@ fun SettingsScreen(
                         checked = normalizeVolume,
                         onCheckedChange = onNormalizeVolumeChange
                     )
+                }
+            }
+        }
+        
+        HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+
+        // Phase 36: Deezer Integration
+        SettingsSectionHeader("Streaming Service")
+        
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Deezer Streaming",
+                            style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            if (deezerArlToken.isNotBlank()) "ARL token configured" else "Not configured",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Button(
+                        onClick = onConfigureDeezer,
+                        modifier = Modifier.padding(start = 12.dp)
+                    ) {
+                        Text(if (deezerArlToken.isNotBlank()) "Manage" else "Setup")
+                    }
                 }
             }
         }

@@ -13,6 +13,8 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.sharl.musicapp.data.DeezerDataSourceFactory
+import com.sharl.musicapp.data.RoutingDataSourceFactory
 import com.sharl.musicapp.data.SettingsRepo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -55,13 +57,15 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        // Simple HTTP DataSource - let yt-dlp handle 403 fallback instead
+        // Phase 36: Routing DataSource factory supporting both HTTP and Deezer streams
         val httpFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
             .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(15_000)
             .setAllowCrossProtocolRedirects(true)
-        val dsFactory = androidx.media3.datasource.DefaultDataSource.Factory(this, httpFactory)
+        
+        // Create routing factory that checks URI scheme
+        val dsFactory = RoutingDataSourceFactory(this, httpFactory)
         val msFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dsFactory)
 
         val exoA = ExoPlayer.Builder(this)

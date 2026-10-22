@@ -61,6 +61,17 @@ class SettingsRepo(context: Context) {
             .apply()
     }
 
+    // Phase 36: Deezer ARL token for full-track streaming
+    var deezerArlToken: String
+        get() = prefs.getString("deezer_arl_token", "").orEmpty()
+        set(v) { prefs.edit().putString("deezer_arl_token", v).apply() }
+
+    fun hasDeezerArlToken(): Boolean = deezerArlToken.isNotBlank()
+
+    fun clearDeezerArlToken() {
+        prefs.edit().remove("deezer_arl_token").apply()
+    }
+
     fun downloadDir(context: Context): java.io.File {
         val base = if (storageExternal) context.getExternalFilesDir(null)
                    else context.filesDir

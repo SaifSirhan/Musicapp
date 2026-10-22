@@ -70,6 +70,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.sharl.musicapp.data.AppDatabase
 import com.sharl.musicapp.data.AuthRepository
+import com.sharl.musicapp.data.DeezerHelper
 import com.sharl.musicapp.data.DiagnosticsManager
 import com.sharl.musicapp.data.Download
 import com.sharl.musicapp.data.DownloadRepository
@@ -106,6 +107,7 @@ import com.sharl.musicapp.ui.components.SongActionsSheet
 import com.sharl.musicapp.ui.components.Thumbnail
 import com.sharl.musicapp.ui.components.asSong
 import com.sharl.musicapp.ui.screens.ArtistScreen
+import com.sharl.musicapp.ui.screens.DeezerLoginScreen
 import com.sharl.musicapp.ui.screens.DownloadMenuAction
 import com.sharl.musicapp.ui.screens.ForYouScreen
 import com.sharl.musicapp.ui.screens.HomeTab
@@ -344,6 +346,8 @@ fun PlayerScreen(
     var showRemoveAllDownloads by remember { mutableStateOf(false) }
     var showClearLibraryConfirm by remember { mutableStateOf(false) }
     var showPrivacyPolicy by remember { mutableStateOf(false) }
+    // Phase 36: Deezer ARL token configuration
+    var showDeezerLogin by remember { mutableStateOf(false) }
     var showDiagnostics by remember { mutableStateOf(false) }
     var notifyUpdates by remember { mutableStateOf(settings.notifyUpdates) }
     var removalProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
@@ -641,25 +645,41 @@ fun PlayerScreen(
         val started = System.currentTimeMillis()
         val song = runCatching { repo.get(videoId) }.getOrNull()
         
-        Log.d("RESOLVE", "Using yt-dlp directly for $videoId (no InnerTube)")
-        fastEngine = false
+        // Phase 36: Use Deezer for streaming instead of YouTube/yt-dlp
+        Log.d("RESOLVE", "Resolving Deezer track $videoId")
         
         try {
-            val result = YtdlpHelper.extractUrlAndMetadata(context, videoId)
-            val elapsed = System.currentTimeMillis() - started
-            DiagnosticsManager.recordYtdlp(result != null, elapsed)
-            
-            if (result != null) {
-                Log.d("RESOLVE", "yt-dlp success for $videoId in ${elapsed}ms")
-                return result
-            } else {
-                Log.e("RESOLVE", "yt-dlp failed for $videoId")
+            // Check if user has Deezer ARL token
+            val arlToken = settings.deezerArlToken
+            if (arlToken.isBlank()) {
+                Log.w("RESOLVE", "No Deezer ARL token configured")
                 return null
             }
+            
+            // Get stream URL from Deezer
+            val streamInfo = DeezerHelper.getStreamUrl(videoId, arlToken)
+            if (streamInfo == null) {
+                Log.e("RESOLVE", "Failed to get Deezer stream URL for $videoId")
+                return null
+            }
+            
+            // Build custom URI with decryption parameters
+            val deezerUri = "deezer://stream?media_url=${streamInfo.mediaUrl}" +
+                "&md5_origin=${streamInfo.md5Origin}" +
+                "&track_id=${videoId}"
+            
+            val elapsed = System.currentTimeMillis() - started
+            Log.d("RESOLVE", "Deezer resolved $videoId in ${elapsed}ms")
+            
+            return deezerUri to SongMetadata(
+                title = fallbackTitle ?: "Track $videoId",
+                artist = "",
+                album = null,
+                thumbnailUrl = null
+            )
         } catch (e: Exception) {
-            DiagnosticsManager.recordYtdlp(false, System.currentTimeMillis() - started, e.message ?: e.javaClass.simpleName)
-            Log.e("RESOLVE", "yt-dlp exception for $videoId: ${e.message}")
-            throw e
+            Log.e("RESOLVE", "Deezer resolution failed for $videoId: ${e.message}")
+            return null
         }
     }
 
@@ -1755,6 +1775,8 @@ fun PlayerScreen(
                     normalizeVolumeState = v
                     settings.normalizeVolume = v
                 },
+                deezerArlToken = settings.deezerArlToken,
+                onConfigureDeezer = { showDeezerLogin = true },
                 accentName = AccentOptions.getOrNull(accentIndex)?.name ?: "Default",
                 accentColor = AccentOptions.getOrNull(accentIndex)?.color ?: DefaultAccent,
                 onOpenAccentPicker = { showColorPicker = true },
@@ -1812,6 +1834,20 @@ fun PlayerScreen(
                     showSettings = false
                     showDiagnostics = true
                 }
+            )
+        // Phase 36: Deezer ARL token configuration dialog
+        } else if (showDeezerLogin) {
+            androidx.activity.compose.BackHandler(enabled = true) {
+                showDeezerLogin = false
+            }
+            com.sharl.musicapp.ui.screens.DeezerLoginScreen(
+                existingToken = settings.deezerArlToken,
+                onSave = { token ->
+                    settings.deezerArlToken = token
+                    showDeezerLogin = false
+                    status = if (token.isNotBlank()) "Deezer configured" else "Deezer token removed"
+                },
+                onBack = { showDeezerLogin = false }
             )
         } else if (showDiagnostics) {
             androidx.activity.compose.BackHandler(enabled = true) {
