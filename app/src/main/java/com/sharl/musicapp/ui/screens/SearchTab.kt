@@ -3,6 +3,7 @@ package com.sharl.musicapp.ui.screens
 import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.ColumnScope
