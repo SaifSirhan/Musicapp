@@ -638,8 +638,7 @@ fun PlayerScreen(
         }
     }
 
-    // Phase 37: Back to basics - yt-dlp only, no InnerTube or Deezer complexity.
-    // All extraction runs on Dispatchers.IO to prevent UI freeze.
+    // Phase 43: All content is downloaded to permanent library. No cache.
     suspend fun resolveRemote(
         videoId: String,
         fallbackTitle: String? = null,
@@ -649,54 +648,56 @@ fun PlayerScreen(
         
         return withContext(Dispatchers.IO) {
             try {
-                Log.d("RESOLVE", "yt-dlp extract $videoId")
+                Log.d("RESOLVE", "Check library for $videoId")
                 
                 // Phase 42: Check connectivity before attempting download
                 val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
                 val isConnected = cm?.activeNetworkInfo?.isConnected == true
                 
                 if (!isConnected) {
-                    // Check if file is already cached locally
-                    val cachedFile = Downloader.cachedStreamFile(context, videoId)
-                    if (cachedFile != null && cachedFile.exists()) {
-                        Log.d("RESOLVE", "Offline mode - using cached file for $videoId")
-                        val uri = android.net.Uri.fromFile(cachedFile).toString()
+                    // Check if file is in permanent library
+                    val download = downloadRepo.get(videoId)
+                    if (download != null) {
+                        val f = java.io.File(download.filePath)
+                        if (f.exists()) {
+                            Log.d("RESOLVE", "Offline mode - using library file for $videoId")
+                            val uri = android.net.Uri.fromFile(f).toString()
+                            return@withContext uri to SongMetadata(
+                                title = download.title,
+                                artist = download.artist,
+                                album = null,
+                                thumbnailUrl = download.thumbnailUrl
+                            )
+                        }
+                    }
+                    Log.w("RESOLVE", "Offline and not in library: $videoId")
+                    throw OfflineException("Song not downloaded")
+                }
+                
+                // Check if already in permanent library
+                val download = downloadRepo.get(videoId)
+                if (download != null) {
+                    val f = java.io.File(download.filePath)
+                    if (f.exists()) {
+                        val uri = android.net.Uri.fromFile(f).toString()
+                        val elapsed = System.currentTimeMillis() - started
+                        Log.d("RESOLVE", "Found in library for $videoId in ${elapsed}ms")
                         return@withContext uri to SongMetadata(
-                            title = fallbackTitle ?: videoId,
-                            artist = "",
+                            title = download.title,
+                            artist = download.artist,
                             album = null,
-                            thumbnailUrl = youtubeThumb(videoId)
+                            thumbnailUrl = download.thumbnailUrl
                         )
-                    } else {
-                        Log.w("RESOLVE", "Offline and not cached: $videoId")
-                        throw OfflineException("Song not downloaded")
                     }
                 }
                 
-                // Use Downloader.cacheForPlayback which already runs on IO dispatcher
-                // and handles mutex locking internally
-                val cachedFile = Downloader.cacheForPlayback(context, videoId)
-                
-                if (cachedFile == null) {
-                    Log.e("RESOLVE", "yt-dlp failed for $videoId")
-                    return@withContext null
-                }
-                
-                val uri = android.net.Uri.fromFile(cachedFile).toString()
-                val elapsed = System.currentTimeMillis() - started
-                
-                Log.d("RESOLVE", "yt-dlp success for $videoId in ${elapsed}ms -> ${cachedFile.absolutePath}")
-                
-                return@withContext uri to SongMetadata(
-                    title = fallbackTitle ?: videoId,
-                    artist = "",
-                    album = null,
-                    thumbnailUrl = youtubeThumb(videoId)
-                )
+                // Not in library - caller must trigger download first
+                Log.w("RESOLVE", "Not in library: $videoId - download required")
+                return@withContext null
             } catch (e: OfflineException) {
                 throw e
             } catch (e: Exception) {
-                Log.e("RESOLVE", "yt-dlp exception for $videoId: ${e.message}", e)
+                Log.e("RESOLVE", "resolve failed for $videoId: ${e.message}", e)
                 return@withContext null
             }
         }
@@ -765,16 +766,9 @@ fun PlayerScreen(
                 )
             }
         }
-        // Stream URLs are CDN-bound and go stale (403). A full yt-dlp download
-        // in the playback cache is a local file, so prefer it over network.
-        Downloader.cachedStreamFile(context, videoId)?.let { f ->
-            return android.net.Uri.fromFile(f).toString() to SongMetadata(
-                title = fallbackTitle ?: videoId,
-                artist = localArtist,
-                album = null,
-                thumbnailUrl = youtubeThumb(videoId)
-            )
-        }
+        // Phase 43: No separate cache. All files in permanent library.
+        // Check downloads database for local file.
+        
         // 1. In-memory (this session) - only for already-resolved local files.
         urlCache[videoId]?.let { pair ->
             // Only use cached result if it's a local file, not a network URL
@@ -787,17 +781,16 @@ fun PlayerScreen(
         // URLs that cause Source Error 2004. Always download to local file first.
         // PlaybackCache is kept for metadata only (title, artist, thumbnail).
         
-        // 2. Cold extract — yt-dlp only; serialized so only one resolver runs at a time.
+        // 2. Cold extract — check library or trigger download; serialized so only one resolver runs at a time.
         loadingVideoId = videoId
         try {
             val result = extractMutex.withLock {
                 resolveRemote(videoId, fallbackTitle, immediateUse)
             } ?: throw StreamingBlockedException().also {
-                Log.e("RESOLVE", "yt-dlp failed for $videoId")
+                Log.e("RESOLVE", "Not in library: $videoId - download required")
             }
             val (u, m) = result
-            // Store metadata in PlaybackCache for UI display, but the URL is
-            // always a local file from Downloader.cacheForPlayback()
+            // Store metadata in PlaybackCache for UI display
             PlaybackCache.put(videoId, u, m.title, m.artist, m.album, m.thumbnailUrl)
             urlCache[videoId] = result
             return result
@@ -840,15 +833,8 @@ fun PlayerScreen(
                 )
             }
         }
-        // Playback-cache downloads are permanent local files too.
-        Downloader.cachedStreamFile(context, videoId)?.let { f ->
-            return android.net.Uri.fromFile(f).toString() to SongMetadata(
-                title = item.title,
-                artist = item.artist,
-                album = null,
-                thumbnailUrl = youtubeThumb(videoId)
-            )
-        }
+        // Phase 43: No separate cache. Check downloads database for local file.
+        
         // In-session cache - only use if it's a local file
         urlCache[videoId]?.let { pair ->
             if (pair.first.startsWith("file://") || pair.first.startsWith("content://")) {
@@ -1587,14 +1573,17 @@ fun PlayerScreen(
                 scope = scope,
                 onPlay = { items, index -> playFromQueue(items, index) },
                 onDownload = { videoId, title, artist ->
-                    // Trigger download for this track
-                    status = "Downloading: $title"
+                    // Phase 43: Trigger permanent download to library
+                    status = "Downloading to Library..."
+                    loadingVideoId = videoId
                     scope.launch {
                         try {
-                            Downloader.cacheForPlayback(context, videoId)
+                            Downloader.downloadSimple(context, settings, videoId, title, artist, youtubeThumb(videoId))
                             status = "Downloaded: $title"
                         } catch (e: Exception) {
                             status = "Download failed: ${e.message}"
+                        } finally {
+                            if (loadingVideoId == videoId) loadingVideoId = null
                         }
                     }
                 },
@@ -2086,12 +2075,12 @@ fun PlayerScreen(
                     onToggleFavorite = { song -> scope.launch { repo.toggleFavorite(song) } },
                     onSongMenu = { menuSong = it },
                     onDownload = { videoId, title, artist ->
-                        // Phase 43: Trigger download for search result
-                        status = "Downloading: $title"
+                        // Phase 43: Trigger permanent download to library
+                        status = "Downloading to Library..."
                         loadingVideoId = videoId
                         scope.launch {
                             try {
-                                Downloader.cacheForPlayback(context, videoId)
+                                Downloader.downloadSimple(context, settings, videoId, title, artist, youtubeThumb(videoId))
                                 status = "Downloaded: $title"
                             } catch (e: Exception) {
                                 status = "Download failed: ${e.message}"

@@ -60,6 +60,83 @@ object Downloader {
 
     fun stateOf(videoId: String): DownloadState = _states.value[videoId] ?: DownloadState.Idle
 
+    // Phase 43: Simple download for search results (uses defaults for missing metadata)
+    suspend fun downloadSimple(
+        context: Context,
+        settings: SettingsRepo,
+        videoId: String,
+        title: String,
+        artist: String,
+        thumb: String?
+    ): File? = withContext(Dispatchers.IO) {
+        val appContext = context.applicationContext
+        mutex.withLock {
+            setState(videoId, DownloadState.Queued)
+            try {
+                ensureInitialized(appContext)
+                val dir = settings.downloadDir(appContext)
+                val outputTemplate = File(dir, "%(id)s.%(ext)s").absolutePath
+
+                val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId").apply {
+                    addOption("--no-playlist")
+                    addOption("--newline")
+                    addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
+                    addOption("-o", outputTemplate)
+                    addOption("--print", "after_move:filepath")
+                    addOption("--extractor-args",
+                        "youtube:player_client=ios,tv,mweb,android_vr,web_embedded,tv_embedded")
+                    addOption("--remote-components", "ejs:github")
+                    addOption("--no-update")
+                    addOption("--no-warnings")
+                }
+
+                val response = YoutubeDL.getInstance().execute(
+                    request,
+                    processId = null,
+                    callback = { progress, _, _ ->
+                        if (progress >= 0f) {
+                            setState(videoId, DownloadState.Downloading(progress.toInt()))
+                        }
+                    }
+                )
+
+                val path = response.out.lineSequence()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                    .lastOrNull()
+
+                val file = path?.let { File(it) }?.takeIf { it.exists() && it.length() > 0L }
+                if (file == null) {
+                    Log.e("DOWNLOAD", "downloadSimple produced no file for $videoId")
+                    setState(videoId, DownloadState.Failed("No file created"))
+                    return@withLock null
+                }
+
+                // Add to downloads database
+                val download = Download(
+                    videoId = videoId,
+                    filePath = file.absolutePath,
+                    fileSizeBytes = file.length(),
+                    downloadedAt = System.currentTimeMillis(),
+                    title = title,
+                    artist = artist,
+                    thumbnailUrl = thumb,
+                    durationMs = 0L
+                )
+                repo(appContext).upsert(download)
+                
+                setState(videoId, DownloadState.Done(file))
+                Log.d("DOWNLOAD", "downloadSimple success: $videoId -> ${file.absolutePath}")
+                file
+            } catch (e: Exception) {
+                Log.e("DOWNLOAD", "downloadSimple failed for $videoId: ${e.message}", e)
+                setState(videoId, DownloadState.Failed(e.message ?: "Unknown error"))
+                null
+            }
+        }
+    }
+
+    // Phase 43: All downloads go to permanent library folder. No separate cache.
     suspend fun download(
         context: Context,
         settings: SettingsRepo,
@@ -143,75 +220,5 @@ object Downloader {
         setState(download.videoId, null)
     }
 
-    // --- Playback cache ------------------------------------------------------
-    // YouTube's modern progressive URLs reject ExoPlayer's headerless request
-    // (HTTP 403) and only serve the first ~1 MB of the file. When that happens
-    // the UI asks yt-dlp for the complete audio once, keeps it in cacheDir and
-    // replays it locally. This is invisible to the Downloads library.
-
-    private fun streamCacheDir(context: Context): File =
-        File(context.cacheDir, "yt_stream").apply { mkdirs() }
-
-    fun cachedStreamFile(context: Context, videoId: String): File? {
-        if (videoId.isBlank()) return null
-        return streamCacheDir(context.applicationContext).listFiles()?.firstOrNull {
-            it.isFile && it.length() > 0L && !it.name.endsWith(".part") &&
-                it.name.startsWith("$videoId.")
-        }
-    }
-
-    suspend fun cacheForPlayback(context: Context, videoId: String): File? =
-        withContext(Dispatchers.IO) {
-            val appContext = context.applicationContext
-            cachedStreamFile(appContext, videoId)?.let { return@withContext it }
-            mutex.withLock {
-                cachedStreamFile(appContext, videoId)?.let { return@withLock it }
-                try {
-                    ensureInitialized(appContext)
-                    val dir = streamCacheDir(appContext)
-                    val request = YoutubeDLRequest(
-                        "https://www.youtube.com/watch?v=$videoId"
-                    ).apply {
-                        addOption("--no-playlist")
-                        addOption("--newline")
-                        addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
-                        addOption("-o", File(dir, "%(id)s.%(ext)s").absolutePath)
-                        addOption("--print", "after_move:filepath")
-                        addOption("--extractor-args",
-                            "youtube:player_client=ios,tv,mweb,android_vr,web_embedded,tv_embedded")
-                        addOption("--remote-components", "ejs:github")
-                        addOption("--no-update")
-                        addOption("--no-warnings")
-                    }
-                    val response = YoutubeDL.getInstance().execute(request)
-                    val path = response.out.lineSequence()
-                        .map { it.trim() }
-                        .filter { it.isNotEmpty() }
-                        .lastOrNull()
-                    val file = path?.let { File(it) }?.takeIf { it.exists() && it.length() > 0L }
-                    if (file == null) {
-                        Log.e("DOWNLOAD", "playback cache produced no file for $videoId")
-                        return@withLock null
-                    }
-                    pruneStreamCache(dir)
-                    Log.d("DOWNLOAD", "cached for playback $videoId -> ${file.absolutePath}")
-                    file
-                } catch (e: Exception) {
-                    Log.e("DOWNLOAD", "playback cache failed for $videoId: ${e.message}", e)
-                    null
-                }
-            }
-        }
-
-    private fun pruneStreamCache(dir: File) {
-        val files = dir.listFiles()?.filter { it.isFile } ?: return
-        var total = files.sumOf { it.length() }
-        var count = files.size
-        val maxBytes = 600L * 1024 * 1024
-        for (f in files.sortedBy { it.lastModified() }) {
-            if (total <= maxBytes && count <= 40) break
-            total -= f.length()
-            if (f.delete()) count--
-        }
-    }
+    // Phase 43: All downloads go to permanent library folder. No separate cache.
 }
