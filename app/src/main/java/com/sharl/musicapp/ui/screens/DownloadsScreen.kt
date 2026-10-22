@@ -71,11 +71,27 @@ fun DownloadsScreen(
     var sortOption by remember { mutableStateOf(SortOption.DATE_ADDED) }
     var showSortMenu by remember { mutableStateOf(false) }
     
+    // Phase 44: Instant local search
+    var searchQuery by remember { mutableStateOf("") }
+    
     val sortedDownloads = remember(downloads, sortOption) {
         when (sortOption) {
             SortOption.DATE_ADDED -> downloads
             SortOption.ARTIST_AZ -> downloads.sortedBy { it.artist.lowercase() }
             SortOption.TITLE_AZ -> downloads.sortedBy { it.title.lowercase() }
+        }
+    }
+    
+    // Phase 44: In-memory filter for instant search
+    val filteredDownloads = remember(sortedDownloads, searchQuery) {
+        if (searchQuery.isBlank()) {
+            sortedDownloads
+        } else {
+            val query = searchQuery.lowercase()
+            sortedDownloads.filter { 
+                it.title.lowercase().contains(query) || 
+                it.artist.lowercase().contains(query)
+            }
         }
     }
     
@@ -162,10 +178,29 @@ fun DownloadsScreen(
             }
         }
         
+        // Phase 44: Search bar for instant local search
+        androidx.compose.material3.OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            placeholder = { Text("Search library...") },
+            leadingIcon = { Text("🔍") },
+            trailingIcon = {
+                if (searchQuery.isNotEmpty()) {
+                    IconButton(onClick = { searchQuery = "" }) {
+                        Text("✕")
+                    }
+                }
+            },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp)
+        )
+        
         HorizontalDivider()
         
         LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
-            itemsIndexed(sortedDownloads, key = { _, d -> d.videoId }) { idx, d ->
+            itemsIndexed(filteredDownloads, key = { _, d -> d.videoId }) { idx, d ->
                 val st = downloadStates[d.videoId]
                 val isSelected = selectedIds.value.contains(d.videoId)
                 
