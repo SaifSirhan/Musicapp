@@ -49,9 +49,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -636,50 +638,43 @@ fun PlayerScreen(
         }
     }
 
-    // Clean pipeline: yt-dlp only. No InnerTube attempts (they just add delay before failing).
+    // Phase 37: Back to basics - yt-dlp only, no InnerTube or Deezer complexity.
+    // All extraction runs on Dispatchers.IO to prevent UI freeze.
     suspend fun resolveRemote(
         videoId: String,
         fallbackTitle: String? = null,
         immediateUse: Boolean = false
     ): Pair<String, SongMetadata>? {
         val started = System.currentTimeMillis()
-        val song = runCatching { repo.get(videoId) }.getOrNull()
         
-        // Phase 36: Use Deezer for streaming instead of YouTube/yt-dlp
-        Log.d("RESOLVE", "Resolving Deezer track $videoId")
-        
-        try {
-            // Check if user has Deezer ARL token
-            val arlToken = settings.deezerArlToken
-            if (arlToken.isBlank()) {
-                Log.w("RESOLVE", "No Deezer ARL token configured")
-                return null
+        return withContext(Dispatchers.IO) {
+            try {
+                Log.d("RESOLVE", "yt-dlp extract $videoId")
+                
+                // Use Downloader.cacheForPlayback which already runs on IO dispatcher
+                // and handles mutex locking internally
+                val cachedFile = Downloader.cacheForPlayback(context, videoId)
+                
+                if (cachedFile == null) {
+                    Log.e("RESOLVE", "yt-dlp failed for $videoId")
+                    return@withContext null
+                }
+                
+                val uri = android.net.Uri.fromFile(cachedFile).toString()
+                val elapsed = System.currentTimeMillis() - started
+                
+                Log.d("RESOLVE", "yt-dlp success for $videoId in ${elapsed}ms -> ${cachedFile.absolutePath}")
+                
+                return@withContext uri to SongMetadata(
+                    title = fallbackTitle ?: videoId,
+                    artist = "",
+                    album = null,
+                    thumbnailUrl = youtubeThumb(videoId)
+                )
+            } catch (e: Exception) {
+                Log.e("RESOLVE", "yt-dlp exception for $videoId: ${e.message}", e)
+                return@withContext null
             }
-            
-            // Get stream URL from Deezer
-            val streamInfo = DeezerHelper.getStreamUrl(videoId, arlToken)
-            if (streamInfo == null) {
-                Log.e("RESOLVE", "Failed to get Deezer stream URL for $videoId")
-                return null
-            }
-            
-            // Build custom URI with decryption parameters
-            val deezerUri = "deezer://stream?media_url=${streamInfo.mediaUrl}" +
-                "&md5_origin=${streamInfo.md5Origin}" +
-                "&track_id=${videoId}"
-            
-            val elapsed = System.currentTimeMillis() - started
-            Log.d("RESOLVE", "Deezer resolved $videoId in ${elapsed}ms")
-            
-            return deezerUri to SongMetadata(
-                title = fallbackTitle ?: "Track $videoId",
-                artist = "",
-                album = null,
-                thumbnailUrl = null
-            )
-        } catch (e: Exception) {
-            Log.e("RESOLVE", "Deezer resolution failed for $videoId: ${e.message}")
-            return null
         }
     }
 
@@ -770,14 +765,13 @@ fun PlayerScreen(
                 thumbnailUrl = c.thumbnailUrl
             )
         }
-        // 3. Cold extract — InnerTube first, yt-dlp fallback; serialized so only
-        // one resolver runs at a time.
+        // 3. Cold extract — yt-dlp only; serialized so only one resolver runs at a time.
         loadingVideoId = videoId
         try {
             val result = extractMutex.withLock {
                 resolveRemote(videoId, fallbackTitle, immediateUse)
             } ?: throw StreamingBlockedException().also {
-                Log.e("RESOLVE", "both InnerTube and yt-dlp failed for $videoId")
+                Log.e("RESOLVE", "yt-dlp failed for $videoId")
             }
             val (u, m) = result
             PlaybackCache.put(videoId, u, m.title, m.artist, m.album, m.thumbnailUrl)
@@ -1007,6 +1001,14 @@ fun PlayerScreen(
         queue = items
         queueIndex = index
         val item = items[index]
+        
+        // Phase 37: Fix "Previous Song" bug - stop and clear before new extraction
+        // to prevent audio overlap from previous track
+        controller?.let { c ->
+            c.stop()
+            c.clearMediaItems()
+        }
+        
         status = "Extracting..."
         if (downloadAhead) downloadSuggestions(items, index + 1)
 
@@ -1033,8 +1035,8 @@ fun PlayerScreen(
         }
 
         // Part B: resolution of the following tracks starts immediately, not
-        // after the seed finishes resolving — each one fetches back-to-back from
-        // InnerTube into PlaybackCache so Next is instant and gapless.
+        // after the seed finishes resolving — each one downloads into cache via
+        // yt-dlp so Next is instant and gapless.
         val upcoming = (index + 1..index + prefetchAhead).filter { it < items.size }
         prefetchJob = scope.launch {
             var queued = 0

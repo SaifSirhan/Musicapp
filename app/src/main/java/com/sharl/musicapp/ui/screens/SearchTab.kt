@@ -26,8 +26,6 @@ import androidx.compose.ui.unit.dp
 import com.sharl.musicapp.QueueItem
 import com.sharl.musicapp.SearchResult
 import com.sharl.musicapp.YtdlpHelper
-import com.sharl.musicapp.data.DeezerHelper
-import com.sharl.musicapp.data.SettingsRepo
 import com.sharl.musicapp.data.Song
 import com.sharl.musicapp.ui.components.SongRow
 import com.sharl.musicapp.ui.util.youtubeThumb
@@ -131,20 +129,10 @@ fun ColumnScope.SearchTab(
             onSearchingChange(true)
             try {
                 val t0 = android.os.SystemClock.elapsedRealtime()
-                
-                // Phase 36: Use Deezer for search instead of YouTube
-                val deezerTracks = DeezerHelper.searchTracks(trimmed, limit = 20)
-                
-                // Convert Deezer tracks to SearchResult format
-                val found = deezerTracks.map { track ->
-                    SearchResult(
-                        title = track.title,
-                        videoId = track.id, // Now holds Deezer track ID
-                        url = "https://www.deezer.com/track/${track.id}"
-                    )
-                }
-                
-                Log.d("DEEZER", "search '${trimmed}' found ${found.size} tracks in ${android.os.SystemClock.elapsedRealtime() - t0}ms")
+                // Phase 37: Back to yt-dlp - simple and reliable
+                val found = YtdlpHelper.searchYouTube(context, trimmed)
+                    .distinctBy { it.videoId }
+                Log.d("YTDL", "search '${trimmed}' took ${android.os.SystemClock.elapsedRealtime() - t0}ms")
                 if (query.trim() == trimmed) {
                     onResultsChange(found)
                     // Warm the first result so an immediate tap is instant.
@@ -152,7 +140,7 @@ fun ColumnScope.SearchTab(
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                Log.e("DEEZER", "live search failed: ${e.message}")
+                Log.e("YTDL", "live search failed: ${e.message}")
             } finally {
                 if (query.trim() == trimmed) onSearchingChange(false)
             }
@@ -250,20 +238,20 @@ fun ColumnScope.SearchTab(
             item { HorizontalDivider() }
             item {
                 Text(
-                    "From Deezer",
+                    "From YouTube",
                     style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
                     color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 8.dp)
                 )
             }
         }
-        itemsIndexed(results, key = { _, result -> "dz:${result.videoId}" }) { _, result ->
+        itemsIndexed(results, key = { _, result -> "yt:${result.videoId}" }) { _, result ->
             val displayTitle = result.title.ifBlank { "Unknown Track" }
             val song = Song(
                 videoId = result.videoId,
                 title = displayTitle,
-                artist = "Deezer",
-                thumbnailUrl = null, // Will be fetched from Deezer API
+                artist = "YouTube",
+                thumbnailUrl = youtubeThumb(result.videoId),
                 lastPlayedAt = 0L,
                 playCount = 0,
                 isFavorite = false,
