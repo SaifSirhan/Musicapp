@@ -91,10 +91,8 @@ fun ArtistScreen(
     LaunchedEffect(selectedAlbum) {
         val album = selectedAlbum ?: return@LaunchedEffect
         albumTracksLoading = true
-        albumTracks = YtdlpHelper.searchYouTube(
-            context,
-            YtdlpHelper.albumTrackQuery(artistName, album.title),
-            limit = 20
+        albumTracks = YtdlpHelper.searchAlbumTracks(
+            context, artistName, album.title, limit = 20
         )
         if (albumTracks.isEmpty()) {
             // Some album titles are too noisy to find individual tracks.
@@ -171,8 +169,10 @@ fun ArtistScreen(
                     val allDownloaded = downloadable.isEmpty() && orderedLocalSongs.isNotEmpty()
                     Button(
                         onClick = {
-                            downloadable.forEachIndexed { idx, t ->
-                                onDownload(t.videoId, t.title, artistName, album.title, idx + 1)
+                            albumTracks.forEachIndexed { idx, t ->
+                                if (t.videoId !in downloadedIds) {
+                                    onDownload(t.videoId, t.title, artistName, album.title, idx + 1)
+                                }
                             }
                         },
                         enabled = downloadable.isNotEmpty(),
@@ -281,12 +281,14 @@ fun ArtistScreen(
                             )
                             IconButton(
                                 onClick = {
+                                    val trackNumber =
+                                        albumTracks.indexOfFirst { it.videoId == result.videoId } + 1
                                     onDownload(
                                         result.videoId,
                                         result.title,
                                         artistName,
                                         album.title,
-                                        idx + 1
+                                        trackNumber.takeIf { it > 0 }
                                     )
                                 }
                             ) {

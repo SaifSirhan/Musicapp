@@ -54,12 +54,14 @@ enum class SortOption { DATE_ADDED, ARTIST_AZ, TITLE_AZ }
 fun DownloadsScreen(
     downloads: List<Download>,
     downloadStates: Map<String, DownloadState>,
-    onPlay: (Int) -> Unit,
+    onPlay: (Download) -> Unit,
     onRemove: (Download) -> Unit,
     onRemoveAll: () -> Unit,
     onFindMusic: () -> Unit,
     onMenuAction: (Download, DownloadMenuAction) -> Unit = { _, _ -> },
-    onBulkDelete: (List<Download>) -> Unit = {}
+    onBulkDelete: (List<Download>) -> Unit = {},
+    totalDownloads: Int = downloads.size,
+    searchQuery: String = ""
 ) {
     var menuDownload by remember { mutableStateOf<Download?>(null) }
     
@@ -71,9 +73,6 @@ fun DownloadsScreen(
     var sortOption by remember { mutableStateOf(SortOption.DATE_ADDED) }
     var showSortMenu by remember { mutableStateOf(false) }
     
-    // Phase 44: Instant local search
-    var searchQuery by remember { mutableStateOf("") }
-    
     val sortedDownloads = remember(downloads, sortOption) {
         when (sortOption) {
             SortOption.DATE_ADDED -> downloads
@@ -82,20 +81,7 @@ fun DownloadsScreen(
         }
     }
     
-    // Phase 44: In-memory filter for instant search
-    val filteredDownloads = remember(sortedDownloads, searchQuery) {
-        if (searchQuery.isBlank()) {
-            sortedDownloads
-        } else {
-            val query = searchQuery.lowercase()
-            sortedDownloads.filter { 
-                it.title.lowercase().contains(query) || 
-                it.artist.lowercase().contains(query)
-            }
-        }
-    }
-    
-    if (downloads.isEmpty()) {
+    if (totalDownloads == 0) {
         Column(
             modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -129,7 +115,8 @@ fun DownloadsScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "${downloads.size} Songs · ${formatBytes(totalBytes)}",
+                if (searchQuery.isBlank()) "${downloads.size} Songs · ${formatBytes(totalBytes)}"
+                else "${downloads.size} of $totalDownloads Songs",
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f)
@@ -178,29 +165,27 @@ fun DownloadsScreen(
             }
         }
         
-        // Phase 44: Search bar for instant local search
-        androidx.compose.material3.OutlinedTextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
-            placeholder = { Text("Search library...") },
-            leadingIcon = { Text("🔍") },
-            trailingIcon = {
-                if (searchQuery.isNotEmpty()) {
-                    IconButton(onClick = { searchQuery = "" }) {
-                        Text("✕")
-                    }
-                }
-            },
-            singleLine = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 4.dp)
-        )
-        
         HorizontalDivider()
         
         LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
-            itemsIndexed(filteredDownloads, key = { _, d -> d.videoId }) { idx, d ->
+            if (sortedDownloads.isEmpty()) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "No songs match \"$searchQuery\"",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+            itemsIndexed(sortedDownloads, key = { _, d -> d.videoId }) { _, d ->
                 val st = downloadStates[d.videoId]
                 val isSelected = selectedIds.value.contains(d.videoId)
                 
@@ -218,7 +203,7 @@ fun DownloadsScreen(
                                     }
                                     selectedIds.value = current
                                 } else {
-                                    onPlay(idx)
+                                    onPlay(d)
                                 }
                             },
                             onLongClick = {

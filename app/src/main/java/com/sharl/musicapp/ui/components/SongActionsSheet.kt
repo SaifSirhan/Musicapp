@@ -27,8 +27,9 @@ fun SongActionsSheet(
     isDownloaded: Boolean,
     onDismiss: () -> Unit,
     onPlayNext: () -> Unit,
-    onAddToQueue: () -> Unit,
-    onStartMix: () -> Unit,
+    onAddToQueue: (() -> Unit)? = null,
+    onStartMix: (() -> Unit)? = null,
+    onAddToPlaylist: (() -> Unit)? = null,
     onDownload: () -> Unit,
     onRemoveDownload: () -> Unit,
     onGoToArtist: (() -> Unit)? = null,
@@ -46,8 +47,15 @@ fun SongActionsSheet(
             HorizontalDivider()
 
             MenuItem("Play next") { onPlayNext() }
-            MenuItem("Add to queue") { onAddToQueue() }
-            MenuItem("Start Mix", icon = "📻") { onStartMix() }
+            if (onAddToPlaylist != null) {
+                MenuItem("Add to playlist") { onAddToPlaylist() }
+            }
+            if (onAddToQueue != null) {
+                MenuItem("Add to queue") { onAddToQueue() }
+            }
+            if (onStartMix != null) {
+                MenuItem("Start Mix", icon = "📻") { onStartMix() }
+            }
 
             when {
                 downloadState is DownloadState.Downloading ->

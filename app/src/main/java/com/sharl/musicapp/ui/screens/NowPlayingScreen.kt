@@ -102,6 +102,8 @@ fun NowPlayingScreen(
     queueIndex: Int,
     queueTabLabel: String = "Queue",
     onQueueItemClick: (Int) -> Unit,
+    onQueueItemMenu: (QueueItem) -> Unit = {},
+    onClearQueue: () -> Unit = {},
     onBack: () -> Unit,
     onPlayPause: () -> Unit,
     skipSeconds: Int = 15,
@@ -441,62 +443,91 @@ fun NowPlayingScreen(
                         }
                     }
                 } else {
-                    LazyColumn(
-                        state = queueListState,
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f)
                     ) {
-                        itemsIndexed(queue) { idx, item ->
-                            val isCurrent = idx == queueIndex
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onQueueItemClick(idx) }
-                                    .padding(vertical = 12.dp, horizontal = 16.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                if (isCurrent) {
-                                    Text(
-                                        "▶",
-                                        color = MaterialTheme.colorScheme.primary,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        modifier = Modifier.padding(end = 12.dp)
-                                    )
-                                } else {
-                                    Text(
-                                        "${idx + 1}.",
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        modifier = Modifier.padding(end = 12.dp)
-                                    )
-                                }
-                                Text(
-                                    text = sanitizeTitle(item.title),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = if (isCurrent)
-                                        MaterialTheme.colorScheme.primary
-                                    else
-                                        MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                if (!downloadedIds.contains(item.videoId)) {
-                                    IconButton(onClick = { onDownloadTrack(item) }) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "${queue.size} tracks",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(onClick = onClearQueue) {
+                                Text("Clear Queue")
+                            }
+                        }
+                        LazyColumn(
+                            state = queueListState,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                        ) {
+                            itemsIndexed(queue, key = { _, item -> item.videoId }) { idx, item ->
+                                val isCurrent = idx == queueIndex
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onQueueItemClick(idx) }
+                                        .padding(start = 16.dp, end = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (isCurrent) {
                                         Text(
-                                            "⬇",
+                                            "▶",
+                                            color = MaterialTheme.colorScheme.primary,
                                             style = MaterialTheme.typography.titleMedium,
+                                            modifier = Modifier.padding(end = 12.dp)
+                                        )
+                                    } else {
+                                        Text(
+                                            "${idx + 1}.",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            modifier = Modifier.padding(end = 12.dp)
+                                        )
+                                    }
+                                    Text(
+                                        text = sanitizeTitle(item.title),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = if (isCurrent)
+                                            MaterialTheme.colorScheme.primary
+                                        else
+                                            MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (!downloadedIds.contains(item.videoId)) {
+                                        IconButton(onClick = { onDownloadTrack(item) }) {
+                                            Text(
+                                                "⬇",
+                                                style = MaterialTheme.typography.titleMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                    IconButton(onClick = { onQueueItemMenu(item) }) {
+                                        Text(
+                                            "⋮",
+                                            style = MaterialTheme.typography.titleLarge,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
                                 }
-                            }
-                            if (idx < queue.size - 1) {
-                                HorizontalDivider(
-                                    modifier = Modifier.padding(horizontal = 16.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant
-                                )
+                                if (idx < queue.size - 1) {
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(horizontal = 16.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                }
                             }
                         }
                     }

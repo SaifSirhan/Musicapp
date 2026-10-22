@@ -233,6 +233,7 @@ fun PlayerScreen(
     var libraryLayout by remember { mutableStateOf(0) }  // 0 = List, 1 = Grid
     var showColorPicker by remember { mutableStateOf(false) }
     var menuSong by remember { mutableStateOf<Song?>(null) }
+    var queueMenuItem by remember { mutableStateOf<QueueItem?>(null) }
 
     var status by remember { mutableStateOf("Connecting...") }
     var query by remember { mutableStateOf("") }
@@ -506,40 +507,38 @@ fun PlayerScreen(
                 }
                 albums.forEachIndexed { albumIdx, album ->
                     status = "Discography ${albumIdx + 1}/${albums.size}: ${album.title}"
-                    val tracks = YtdlpHelper.searchYouTube(
-                        context,
-                        YtdlpHelper.albumTrackQuery(artist, album.title),
-                        limit = 12
+                    val tracks = YtdlpHelper.searchAlbumTracks(
+                        context, artist, album.title, limit = 20
                     )
-                    tracks.filter { it.videoId !in downloadIds }
-                        .forEachIndexed { trackIdx, t ->
-                            try {
-                                val file = Downloader.downloadSimple(
-                                    context,
-                                    settings,
+                    tracks.forEachIndexed { trackIdx, t ->
+                        if (t.videoId in downloadIds) return@forEachIndexed
+                        try {
+                            val file = Downloader.downloadSimple(
+                                context,
+                                settings,
+                                t.videoId,
+                                t.title,
+                                artist,
+                                youtubeThumb(t.videoId)
+                            )
+                            if (file != null) {
+                                repo.saveDownloadedSong(
                                     t.videoId,
                                     t.title,
                                     artist,
-                                    youtubeThumb(t.videoId)
+                                    album.title,
+                                    youtubeThumb(t.videoId),
+                                    trackIdx + 1
                                 )
-                                if (file != null) {
-                                    repo.saveDownloadedSong(
-                                        t.videoId,
-                                        t.title,
-                                        artist,
-                                        album.title,
-                                        youtubeThumb(t.videoId),
-                                        trackIdx + 1
-                                    )
-                                    downloaded++
-                                } else {
-                                    failed++
-                                }
-                            } catch (e: Exception) {
+                                downloaded++
+                            } else {
                                 failed++
-                                Log.w("DISC", "discography download failed for ${t.videoId}", e)
                             }
+                        } catch (e: Exception) {
+                            failed++
+                            Log.w("DISC", "discography download failed for ${t.videoId}", e)
                         }
+                    }
                 }
                 status = "Discography done: $downloaded downloaded" +
                     if (failed > 0) ", $failed failed" else ""
@@ -1400,17 +1399,9 @@ fun PlayerScreen(
         }
     }
 
-    // Phase 22: hide the track for future mixes and drop it from the active
-    // queue. Hiding the current track advances to the next one; hiding a track
-    // inside the player's loaded window rebuilds the window so the queue_index
-    // extras stay aligned with the compacted queue.
-    fun notInterested(song: Song) {
-        scope.launch { repo.hide(song) }
-        val idx = queue.indexOfFirst { it.videoId == song.videoId }
-        if (idx < 0) {
-            status = "Hidden: ${song.title}"
-            return
-        }
+    // Remove one queue entry, keeping the player window and queue index aligned.
+    fun dropFromQueue(idx: Int) {
+        if (idx !in queue.indices) return
         val updated = queue.filterIndexed { i, _ -> i != idx }
         val c = controller
         if (c == null) {
@@ -1432,7 +1423,6 @@ fun PlayerScreen(
                     queueIndex = -1
                     windowStart = 0
                     showNowPlaying = false
-                    status = "Queue empty"
                 } else {
                     playFromQueue(updated, idx.coerceAtMost(updated.size - 1))
                 }
@@ -1444,6 +1434,63 @@ fun PlayerScreen(
             }
             else -> queue = updated
         }
+    }
+
+    fun removeFromQueue(item: QueueItem) {
+        val idx = queue.indexOfFirst { it.videoId == item.videoId }
+        if (idx < 0) return
+        dropFromQueue(idx)
+        status = "Removed from queue: ${item.title}"
+    }
+
+    // Move an upcoming track directly behind the current one. Items before the
+    // current index are already played, so they are left in place.
+    fun moveQueueItemNext(item: QueueItem) {
+        val idx = queue.indexOfFirst { it.videoId == item.videoId }
+        if (idx < 0 || queueIndex < 0) return
+        if (idx <= queueIndex) {
+            status = "Already played: ${item.title}"
+            return
+        }
+        if (idx == queueIndex + 1) {
+            status = "Already next: ${item.title}"
+            return
+        }
+        queue = queue.toMutableList().apply {
+            removeAt(idx)
+            add(queueIndex + 1, item)
+        }
+        status = "Playing next: ${item.title}"
+        relinkPlayerWindowTail()
+    }
+
+    fun clearQueue() {
+        controller?.let {
+            it.clearMediaItems()
+            it.stop()
+        }
+        queue = emptyList()
+        queueIndex = -1
+        windowStart = 0
+        nowPlayingTitle = null
+        nowPlayingArtist = null
+        nowPlayingThumbnail = null
+        isPlaying = false
+        currentPosMs = 0
+        currentDurationMs = 0
+        showNowPlaying = false
+        status = "Queue cleared"
+    }
+
+    // Phase 22: hide the track for future mixes and drop it from the active queue.
+    fun notInterested(song: Song) {
+        scope.launch { repo.hide(song) }
+        val idx = queue.indexOfFirst { it.videoId == song.videoId }
+        if (idx < 0) {
+            status = "Hidden: ${song.title}"
+            return
+        }
+        dropFromQueue(idx)
         status = "Not interested: ${song.title}"
     }
 
@@ -1729,6 +1776,8 @@ fun PlayerScreen(
                 queueIndex = queueIndex,
                 queueTabLabel = activeMixTitle?.let { "Mix: $it" } ?: "Queue",
                 onQueueItemClick = { idx -> playFromQueue(queue, idx) },
+                onQueueItemMenu = { item -> queueMenuItem = item },
+                onClearQueue = { clearQueue() },
                 onBack = { showNowPlaying = false },
                 onPlayPause = {
                     val c = controller ?: return@NowPlayingScreen
@@ -2512,6 +2561,48 @@ fun PlayerScreen(
                     MenuItem("Not interested") {
                         notInterested(song)
                         menuSong = null
+                    }
+                }
+            )
+        }
+
+        val queued = queueMenuItem
+        if (queued != null) {
+            val song = Song(
+                videoId = queued.videoId,
+                title = queued.title,
+                artist = queued.artist,
+                thumbnailUrl = youtubeThumb(queued.videoId),
+                lastPlayedAt = 0L,
+                playCount = 0
+            )
+            SongActionsSheet(
+                song = song,
+                downloadState = downloadStates[song.videoId],
+                isDownloaded = downloadIds.contains(song.videoId),
+                onDismiss = { queueMenuItem = null },
+                onPlayNext = {
+                    moveQueueItemNext(queued)
+                    queueMenuItem = null
+                },
+                onAddToPlaylist = {
+                    showAddToPlaylist = song
+                    queueMenuItem = null
+                },
+                onDownload = {
+                    startDownload(song.videoId, song.title, song.artist, song.thumbnailUrl, 0L)
+                    queueMenuItem = null
+                },
+                onRemoveDownload = {
+                    scope.launch {
+                        downloadRepo.get(song.videoId)?.let { Downloader.remove(context, it) }
+                    }
+                    queueMenuItem = null
+                },
+                extraActions = {
+                    MenuItem("Remove from queue") {
+                        removeFromQueue(queued)
+                        queueMenuItem = null
                     }
                 }
             )

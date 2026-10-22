@@ -21,6 +21,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -109,7 +110,18 @@ fun ColumnScope.SearchTab(
     }
 
     // Track the current search job so we can cancel stale queries
-    val currentSearchJob = androidx.compose.runtime.mutableStateOf<kotlinx.coroutines.Job?>(null)
+    val currentSearchJob = remember {
+        androidx.compose.runtime.mutableStateOf<kotlinx.coroutines.Job?>(null)
+    }
+
+    val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+    val isOffline = cm?.activeNetworkInfo?.isConnected != true
+    // Offline: only downloaded songs can actually be played.
+    val visibleLocalMatches = if (isOffline) {
+        localMatches.filter { downloadIds.contains(it.videoId) }
+    } else {
+        localMatches
+    }
 
     LaunchedEffect(query) {
         val trimmed = query.trim()
@@ -193,30 +205,19 @@ fun ColumnScope.SearchTab(
         }
     }
 
-    // Phase 43: Show offline message when no connectivity and user tries to search
-    val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
-    val isOffline = cm?.activeNetworkInfo?.isConnected != true && query.trim().isNotBlank()
-    
-    if (isOffline) {
-        Column(
+    // Offline searches still work against the downloaded library.
+    if (isOffline && query.trim().isNotBlank()) {
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
+            Text("📵", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.width(8.dp))
             Text(
-                "📵",
-                style = androidx.compose.material3.MaterialTheme.typography.displaySmall
-            )
-            Spacer(Modifier.height(12.dp))
-            Text(
-                "You are offline.",
-                style = androidx.compose.material3.MaterialTheme.typography.titleMedium
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Search disabled. Play from your library.",
-                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                "Offline — searching your downloaded library only.",
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                 color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
@@ -259,16 +260,16 @@ fun ColumnScope.SearchTab(
                 }
             }
         }
-        if (localMatches.isNotEmpty()) {
+        if (visibleLocalMatches.isNotEmpty()) {
             item {
                 Text(
-                    "In your library",
+                    if (isOffline) "In your downloads" else "In your library",
                     style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
                     color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 8.dp)
                 )
             }
-            items(localMatches, key = { "local:${it.videoId}" }) { song ->
+            items(visibleLocalMatches, key = { "local:${it.videoId}" }) { song ->
                 SongRow(
                     song = song,
                     onClick = { onStartMix(song) },
@@ -280,13 +281,15 @@ fun ColumnScope.SearchTab(
                 )
             }
             item { HorizontalDivider() }
-            item {
-                Text(
-                    "From YouTube",
-                    style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 8.dp)
-                )
+            if (!isOffline && results.isNotEmpty()) {
+                item {
+                    Text(
+                        "From YouTube",
+                        style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 8.dp)
+                    )
+                }
             }
         }
         itemsIndexed(results, key = { _, result -> "yt:${result.videoId}" }) { _, result ->
@@ -361,7 +364,7 @@ fun ColumnScope.SearchTab(
                 color = androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant
             )
         }
-        if (!isSearching && query.trim().length >= 2 && localMatches.isEmpty() && results.isEmpty()) {
+        if (!isSearching && query.trim().length >= 2 && visibleLocalMatches.isEmpty() && results.isEmpty()) {
             item {
                 Box(
                     modifier = Modifier

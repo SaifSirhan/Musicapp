@@ -95,13 +95,48 @@ object YtdlpHelper {
         "full album", "livestream", "podcast"
     )
 
-    // Titles containing one of these are promoted to the top (not required).
-    private val SEARCH_PREFERRED = listOf(
-        "official audio", "official video", "lyrics", "audio", "music video"
+    private const val MIN_DURATION_MS = 45_000L
+    private const val MIN_ALBUM_TRACK_MS = 20_000L
+    private const val MAX_TRACK_MS = 10L * 60 * 1000
+
+    // Upload noise that should not distinguish two copies of the same song.
+    private val UPLOAD_NOISE = Regex(
+        "(?i)\\b(?:official\\s+(?:music\\s+)?video|official\\s+audio|lyric\\s+video|" +
+            "lyrics?|audio|visuali[sz]er|full\\s+album|hd|hq|4k)\\b"
+    )
+    private val BRACKETED_NOISE = Regex(
+        "(?i)[(\\[{][^)\\]}]*(?:official|lyrics?|audio|video|visuali[sz]er|" +
+            "full album|hd|hq|4k)[^)\\]}]*[)\\]}]"
     )
 
-    private const val MIN_DURATION_MS = 45_000L
-    private const val MAX_DURATION_MS = 12L * 60 * 1000
+    fun normalizeTitle(raw: String, artist: String? = null): String {
+        var t = raw
+        if (!artist.isNullOrBlank()) {
+            t = t.replace(
+                Regex("^\\s*${Regex.escape(artist)}\\s*[-–—:]\\s*", RegexOption.IGNORE_CASE),
+                ""
+            )
+        }
+        t = t.replace(BRACKETED_NOISE, " ")
+        t = t.replace(UPLOAD_NOISE, " ")
+        t = t.replace(Regex("(?i)\\s*[-–—]\\s*(?:topic|album|single)\\s*$"), "")
+        t = t.replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim().lowercase()
+        return t.ifBlank { raw.trim().lowercase() }
+    }
+
+    // Topic channels are label-generated uploads of the clean album cut.
+    private fun qualityRank(title: String, channel: String?): Int {
+        val t = title.lowercase()
+        val c = channel?.lowercase().orEmpty()
+        return when {
+            c.contains(" - topic") -> 100
+            "official audio" in t -> 80
+            "audio" in t -> 60
+            "lyric video" in t || "lyrics" in t -> 40
+            "official video" in t || "music video" in t -> 20
+            else -> 0
+        }
+    }
 
     /**
      * Phase 42: Local-first - yt-dlp only, no InnerTube. Search takes ~3-5s.
@@ -137,16 +172,32 @@ object YtdlpHelper {
         }
     }
 
-    // Duration/junk filters and the "official audio" boost, shared by both paths.
-    private data class Raw(val videoId: String, val title: String, val durationMs: Long?)
+    // Duration/junk filters and title dedup, shared by every search path.
+    private data class Raw(
+        val videoId: String,
+        val title: String,
+        val durationMs: Long?,
+        val channel: String?,
+        val quality: Int
+    )
+
+    // Collapse alternate uploads of one song onto its normalized title, keeping
+    // the highest-quality copy at the position where the title first appeared.
+    private fun dedupeByTitle(raw: List<Raw>, artist: String? = null): List<Raw> {
+        val unique = LinkedHashMap<String, Raw>()
+        for (r in raw) {
+            val key = normalizeTitle(r.title, artist)
+            val prev = unique[key]
+            if (prev == null || r.quality > prev.quality) unique[key] = r
+        }
+        return unique.values.toList()
+    }
 
     private fun scoreResults(raw: List<Raw>, limit: Int): List<SearchResult> =
-        raw
-            .filter { it.durationMs == null || it.durationMs in MIN_DURATION_MS..MAX_DURATION_MS }
+        dedupeByTitle(raw)
+            .filter { it.durationMs == null || it.durationMs in MIN_DURATION_MS..MAX_TRACK_MS }
             .filter { r -> SEARCH_JUNK.none { r.title.contains(it, ignoreCase = true) } }
-            .sortedByDescending { r ->
-                if (SEARCH_PREFERRED.any { r.title.contains(it, ignoreCase = true) }) 1 else 0
-            }
+            .sortedByDescending { it.quality }
             .distinctBy { it.videoId }
             .take(limit.coerceAtMost(10))
             .map { r -> SearchResult(title = r.title, videoId = r.videoId, url = "https://www.youtube.com/watch?v=${r.videoId}") }
@@ -155,45 +206,164 @@ object YtdlpHelper {
         context: Context,
         query: String,
         limit: Int
-    ): List<SearchResult> =
-        withContext(Dispatchers.IO) {
-            ensureInitialized(context)
+    ): List<SearchResult> {
+        // --flat-playlist pulls metadata for each entry without visiting its
+        // page (~2s vs ~11s), and --dump-single-json gives one parseable object.
+        val raw = fetchSearchEntries(context, "ytsearch20:$query")
+        return scoreResults(raw, limit)
+    }
 
-            // --flat-playlist pulls metadata for each entry without visiting its
-            // page (~2s vs ~11s), and --dump-single-json gives one parseable object.
-            // We pull 20 and filter down client-side.
-            val request = YoutubeDLRequest("ytsearch20:$query").apply {
-                addOption("--flat-playlist")
-                addOption("--dump-single-json")
-                addOption("--no-update")
-                addOption("--no-warnings")
-            }
+    private data class Listing(val title: String?, val entries: List<Raw>)
 
-            val response = YoutubeDL.getInstance().execute(request)
-            Log.d("YTDL", "search raw out:\n${response.out}")
-            Log.d("YTDL", "search raw err:\n${response.err}")
+    private suspend fun fetchSearchEntries(
+        context: Context,
+        url: String
+    ): List<Raw> = fetchListing(context, url).entries
 
-            val entries = try {
-                val start = response.out.indexOf('{')
-                val root = org.json.JSONObject(response.out.substring(start.coerceAtLeast(0)))
-                root.optJSONArray("entries") ?: org.json.JSONArray()
-            } catch (e: Exception) {
-                Log.e("YTDL", "search JSON parse failed: ${e.message}")
-                org.json.JSONArray()
-            }
-
-            val raw = ArrayList<Raw>(entries.length())
-            for (i in 0 until entries.length()) {
-                val e = entries.optJSONObject(i) ?: continue
-                val videoId = e.optString("id").ifBlank { e.optString("url") }
-                if (videoId.isBlank()) continue
-                val durationMs = if (e.has("duration") && !e.isNull("duration")) {
-                    (e.optDouble("duration", -1.0) * 1000).toLong()
-                } else null
-                raw += Raw(videoId, e.optString("title"), durationMs)
-            }
-            scoreResults(raw, limit)
+    private suspend fun fetchListing(
+        context: Context,
+        url: String
+    ): Listing = withContext(Dispatchers.IO) {
+        ensureInitialized(context)
+        val request = YoutubeDLRequest(url).apply {
+            addOption("--flat-playlist")
+            addOption("--dump-single-json")
+            addOption("--no-update")
+            addOption("--no-warnings")
         }
+
+        val response = YoutubeDL.getInstance().execute(request)
+        Log.d("YTDL", "search raw out:\n${response.out}")
+        Log.d("YTDL", "search raw err:\n${response.err}")
+
+        var title: String? = null
+        val entries = try {
+            val start = response.out.indexOf('{')
+            val root = org.json.JSONObject(response.out.substring(start.coerceAtLeast(0)))
+            title = root.optString("title").takeIf { it.isNotBlank() }
+            root.optJSONArray("entries") ?: org.json.JSONArray()
+        } catch (e: Exception) {
+            Log.e("YTDL", "search JSON parse failed: ${e.message}")
+            org.json.JSONArray()
+        }
+
+        val raw = ArrayList<Raw>(entries.length())
+        for (i in 0 until entries.length()) {
+            val e = entries.optJSONObject(i) ?: continue
+            val url2 = e.optString("url")
+            val videoId = e.optString("id").ifBlank {
+                Regex("[?&]v=([A-Za-z0-9_-]{11})").find(url2)?.groupValues?.get(1).orEmpty()
+            }
+            if (videoId.isBlank()) continue
+            val durationMs = if (e.has("duration") && !e.isNull("duration")) {
+                (e.optDouble("duration", -1.0) * 1000).toLong()
+            } else null
+            val title2 = e.optString("title")
+            val channel = e.optString("channel").ifBlank {
+                e.optString("uploader").ifBlank { e.optString("artists") }
+            }.takeIf { it.isNotBlank() && it != "NA" }
+            raw += Raw(videoId, title2, durationMs, channel, qualityRank(title2, channel))
+        }
+        Listing(title, raw)
+    }
+
+    // The bundled yt-dlp dropped the ytmsearch: prefix; music.youtube.com search
+    // URLs are the supported equivalent. Album results carry a playlist id whose
+    // flat listing is the official, ordered tracklist.
+    private const val YTM_SEARCH_URL = "https://music.youtube.com/search?q="
+
+    private fun musicSearchUrl(query: String, section: String? = null): String {
+        val encoded = java.net.URLEncoder.encode(query, "UTF-8")
+        return buildString {
+            append(YTM_SEARCH_URL).append(encoded)
+            if (section != null) append('#').append(section)
+        }
+    }
+
+    private fun albumBrowseUrls(entries: List<Raw>): List<String> =
+        entries.take(3).map { "https://music.youtube.com/browse/${it.videoId}" }
+
+    private fun albumTracksFrom(
+        raw: List<Raw>,
+        artist: String,
+        limit: Int,
+        enforceMaxDuration: Boolean = true
+    ): List<SearchResult> =
+        dedupeByTitle(
+            raw.filter { r ->
+                val d = r.durationMs
+                val max = if (enforceMaxDuration) MAX_TRACK_MS else 30L * 60 * 1000
+                (d == null || d in MIN_ALBUM_TRACK_MS..max) &&
+                    !r.title.contains("full album", ignoreCase = true)
+            },
+            artist
+        )
+            .take(limit)
+            .map {
+                SearchResult(
+                    title = it.title,
+                    videoId = it.videoId,
+                    url = "https://www.youtube.com/watch?v=${it.videoId}"
+                )
+            }
+
+    suspend fun searchAlbumTracks(
+        context: Context,
+        artist: String,
+        albumTitle: String,
+        limit: Int = 20
+    ): List<SearchResult> = withContext(Dispatchers.IO) {
+        val query = "$artist $albumTitle".trim()
+        try {
+            var tracks = emptyList<SearchResult>()
+
+            // Album cards are browse ids, so probe the top results until one's
+            // title matches; its flat listing is the ordered official tracklist.
+            val albumCards = runCatching { fetchSearchEntries(context, musicSearchUrl(query, "albums")) }
+                .onFailure { Log.w("ALBUM", "YouTube Music album search failed: ${it.message}") }
+                .getOrDefault(emptyList())
+            val target = normalizeTitle(albumTitle).trim()
+            for (playlistUrl in albumBrowseUrls(albumCards)) {
+                val listing = runCatching { fetchListing(context, playlistUrl) }
+                    .onFailure { Log.w("ALBUM", "album probe failed for $playlistUrl: ${it.message}") }
+                    .getOrNull() ?: continue
+                val name = listing.title?.substringAfter("Album - ", listing.title).orEmpty()
+                val normalizedName = normalizeTitle(name).trim()
+                Log.d("ALBUM", "probe $playlistUrl -> '$name' (${listing.entries.size} tracks)")
+                val matches = target.isNotBlank() && normalizedName.isNotBlank() &&
+                    (normalizedName.contains(target) || target.contains(normalizedName))
+                if (matches) {
+                    tracks = albumTracksFrom(listing.entries, artist, limit, enforceMaxDuration = false)
+                    if (tracks.isNotEmpty()) {
+                        Log.d("ALBUM", "using official album '$name'")
+                        break
+                    }
+                }
+            }
+
+            if (tracks.isEmpty()) {
+                Log.w("ALBUM", "No matching album playlist for '$query'; trying YouTube Music songs")
+                val songs = runCatching { fetchSearchEntries(context, musicSearchUrl(query, "songs")) }
+                    .onFailure { Log.w("ALBUM", "YouTube Music songs search failed: ${it.message}") }
+                    .getOrDefault(emptyList())
+                tracks = albumTracksFrom(songs, artist, limit)
+            }
+
+            if (tracks.isEmpty()) {
+                Log.w("ALBUM", "YouTube Music yielded nothing for '$query'; falling back to ytsearch")
+                val raw = runCatching { fetchSearchEntries(context, "ytsearch20:$query") }
+                    .onFailure { Log.w("ALBUM", "ytsearch fallback failed: ${it.message}") }
+                    .getOrDefault(emptyList())
+                tracks = albumTracksFrom(raw, artist, limit)
+            }
+
+            Log.d("ALBUM", "'$query' -> ${tracks.map { it.title }}")
+            tracks
+        } catch (e: Exception) {
+            Log.e("ALBUM", "Album track search failed for '$artist / $albumTitle': ${e.message}", e)
+            emptyList()
+        }
+    }
 
     // Album uploads legitimately carry "full album" in the title, so they get a
     // narrower junk list than track search.
@@ -250,16 +420,6 @@ object YtdlpHelper {
             Log.e("ARTIST", "Album search failed for '$artist': ${e.message}", e)
             emptyList()
         }
-    }
-
-    // "Full album" upload titles make YouTube return more full albums instead of
-    // individual tracks, so strip those words from the tracklist search.
-    fun albumTrackQuery(artist: String, albumTitle: String): String {
-        val cleaned = Regex("(?i)full album|official|album|audio|video")
-            .replace(albumTitle, " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-        return "$artist $cleaned".trim()
     }
 
     private fun cleanAlbumTitle(raw: String, artist: String): String {        var t = raw

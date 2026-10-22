@@ -22,9 +22,11 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -109,6 +111,17 @@ fun ColumnScope.LibraryTab(
     // Phase 44d: Nested tabs for Songs/Artists/Playlists
     var librarySubTab by remember { mutableStateOf(0) } // 0=Songs, 1=Artists, 2=Playlists
     var selectedArtist by remember { mutableStateOf<String?>(null) }
+    var librarySearch by remember { mutableStateOf("") }
+    val filteredDownloads by remember(downloads) {
+        derivedStateOf {
+            val q = librarySearch.trim()
+            if (q.isEmpty()) downloads
+            else downloads.filter {
+                it.title.contains(q, ignoreCase = true) ||
+                    it.artist.contains(q, ignoreCase = true)
+            }
+        }
+    }
     
     // Phase 44d: Get unique artists from downloads
     val artists = remember(downloads) {
@@ -148,28 +161,56 @@ fun ColumnScope.LibraryTab(
 
         when (librarySubTab) {
             0 -> {
-                // Songs Tab - show DownloadsScreen with search
-                Box(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
                 ) {
-                    DownloadsScreen(
-                        downloads = downloads,
-                        downloadStates = downloadStates,
-                        onPlay = { index ->
-                            onPlayFromQueue(
-                                downloads.map { QueueItem(it.videoId, it.title, it.artist) },
-                                index
-                            )
+                    OutlinedTextField(
+                        value = librarySearch,
+                        onValueChange = { librarySearch = it },
+                        placeholder = { Text("Search songs or artists…") },
+                        leadingIcon = { Text("🔍") },
+                        trailingIcon = {
+                            if (librarySearch.isNotEmpty()) {
+                                IconButton(onClick = { librarySearch = "" }) {
+                                    Text("✕")
+                                }
+                            }
                         },
-                        onRemove = { d ->
-                            scope.launch { Downloader.remove(context, d) }
-                        },
-                        onRemoveAll = { onRemoveAllDownloads() },
-                        onFindMusic = { onFindMusic() },
-                        onMenuAction = onDownloadMenuAction
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
                     )
+                    // Songs Tab - show DownloadsScreen with search
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                    ) {
+                        DownloadsScreen(
+                            downloads = filteredDownloads,
+                            totalDownloads = downloads.size,
+                            searchQuery = librarySearch,
+                            downloadStates = downloadStates,
+                            onPlay = { d ->
+                                val index = filteredDownloads.indexOfFirst {
+                                    it.videoId == d.videoId
+                                }
+                                onPlayFromQueue(
+                                    filteredDownloads.map { QueueItem(it.videoId, it.title, it.artist) },
+                                    index.coerceAtLeast(0)
+                                )
+                            },
+                            onRemove = { d ->
+                                scope.launch { Downloader.remove(context, d) }
+                            },
+                            onRemoveAll = { onRemoveAllDownloads() },
+                            onFindMusic = { onFindMusic() },
+                            onMenuAction = onDownloadMenuAction
+                        )
+                    }
                 }
             }
             1 -> {
