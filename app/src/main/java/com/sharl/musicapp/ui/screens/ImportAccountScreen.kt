@@ -1,10 +1,14 @@
 package com.sharl.musicapp.ui.screens
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -28,6 +32,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -457,6 +463,9 @@ fun ImportAccountScreen(
 
     // Device flow authorization dialog
     if (showDeviceCodeDialog && deviceCodeInfo != null) {
+        val clipboardManager = LocalClipboard.current
+        val appContext = context.applicationContext
+
         AlertDialog(
             onDismissRequest = {
                 showDeviceCodeDialog = false
@@ -464,29 +473,58 @@ fun ImportAccountScreen(
             },
             title = { Text("Authorize YouTube Music") },
             text = {
-                Column {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Clickable URL
                     Text(
-                        "1. Go to ${deviceCodeInfo!!.verificationUrl}",
+                        "1. Go to ",
                         style = MaterialTheme.typography.bodyMedium
                     )
-                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = deviceCodeInfo!!.verificationUrl,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            color = MaterialTheme.colorScheme.primary
+                        ),
+                        modifier = Modifier.clickable {
+                            val intent = android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse(deviceCodeInfo!!.verificationUrl)
+                            )
+                            context.startActivity(intent)
+                        }
+                    )
+                    
+                    Spacer(Modifier.height(4.dp))
+                    
+                    // User code with copy button
                     Text(
                         "2. Enter this code:",
                         style = MaterialTheme.typography.bodyMedium
                     )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            deviceCodeInfo!!.userCode,
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        IconButton(onClick = {
+                            val clipboard = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val clip = ClipData.newPlainText("YouTube Code", deviceCodeInfo!!.userCode)
+                            clipboard.setPrimaryClip(clip)
+                        }) {
+                            Text("📋", style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                    
                     Spacer(Modifier.height(4.dp))
-                    Text(
-                        deviceCodeInfo!!.userCode,
-                        style = MaterialTheme.typography.headlineMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(Modifier.height(12.dp))
+                    
                     Text(
                         "Waiting for authorization...",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(Modifier.height(8.dp))
                     CircularProgressIndicator(modifier = Modifier.size(24.dp))
                 }
             },
