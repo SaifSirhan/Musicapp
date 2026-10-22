@@ -90,7 +90,6 @@ import com.sharl.musicapp.data.NowPlaying
 import com.sharl.musicapp.data.PlaybackCache
 import com.sharl.musicapp.data.Playlist
 import com.sharl.musicapp.data.PlaylistRepository
-import com.sharl.musicapp.data.PlaylistSong
 import com.sharl.musicapp.data.Profile
 import com.sharl.musicapp.data.ProfileRepository
 import com.sharl.musicapp.data.SettingsRepo
@@ -309,7 +308,7 @@ fun PlayerScreen(
     var showRenamePlaylist by remember { mutableStateOf(false) }
     var renamePlaylistName by remember { mutableStateOf("") }
     var showDeletePlaylistConfirm by remember { mutableStateOf(false) }
-    var playlistMenuSong by remember { mutableStateOf<PlaylistSong?>(null) }
+    var playlistMenuSong by remember { mutableStateOf<Song?>(null) }
     var playlistMenuPlaylistId by remember { mutableStateOf<Long?>(null) }
     // Phase 24: artist page shown over the tabs; null = hidden.
     var artistScreenName by remember { mutableStateOf<String?>(null) }
@@ -2597,14 +2596,6 @@ fun PlayerScreen(
 
         val ps = playlistMenuSong
         if (ps != null && playlistMenuPlaylistId != null) {
-            val psSong = Song(
-                videoId = ps.videoId,
-                title = ps.title,
-                artist = ps.artist,
-                thumbnailUrl = ps.thumbnailUrl ?: youtubeThumb(ps.videoId),
-                lastPlayedAt = 0L,
-                playCount = 0
-            )
             val psGoToArtist: (() -> Unit)? = if (ps.artist.isNotBlank()) {
                 {
                     artistScreenName = ps.artist
@@ -2612,19 +2603,19 @@ fun PlayerScreen(
                 }
             } else null
             SongActionsSheet(
-                song = psSong,
+                song = ps,
                 downloadState = downloadStates[ps.videoId],
                 isDownloaded = downloadIds.contains(ps.videoId),
                 onDismiss = { playlistMenuSong = null },
                 onPlayNext = {
-                    insertIntoQueueNext(psSong)
+                    insertIntoQueueNext(ps)
                     playlistMenuSong = null
                 },
                 onAddToQueue = {
-                    appendToQueue(psSong)
+                    appendToQueue(ps)
                     playlistMenuSong = null
                 },
-                onStartMix = { startMix(psSong) },
+                onStartMix = { startMix(ps) },
                 onDownload = {
                     startDownload(
                         ps.videoId, ps.title, ps.artist,

@@ -24,7 +24,7 @@ interface PlaylistDao {
     @Query("DELETE FROM playlists")
     suspend fun clearAllPlaylists()
 
-    // Phase 44: New CrossRef-based queries
+    // Phase 44: CrossRef-based queries only
     @Query("DELETE FROM playlist_song_cross_ref")
     suspend fun clearAllCrossRefs()
 
@@ -48,57 +48,26 @@ interface PlaylistDao {
         WHERE ps.playlistId = :playlistId 
         ORDER BY ps.position ASC
     """)
-    fun songsInPlaylistNew(playlistId: Long): Flow<List<Song>>
+    fun songsInPlaylist(playlistId: Long): Flow<List<Song>>
 
-    /**
-     * Legacy: Keep using old PlaylistSong table for backward compatibility.
-     * TODO: Migrate all callers to songsInPlaylistNew() and remove this.
-     */
-    @Query("SELECT * FROM playlist_songs WHERE playlistId = :playlistId ORDER BY addedAt DESC")
-    fun songsInPlaylist(playlistId: Long): Flow<List<PlaylistSong>>
-
-    @Query("DELETE FROM playlist_songs")
-    suspend fun clearAllPlaylistSongs()
-
-    @Query("DELETE FROM playlist_songs WHERE playlistId = :id")
-    suspend fun clearPlaylistSongs(id: Long)
-
-    @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun addSong(ps: PlaylistSong): Long
-
-    @Query("DELETE FROM playlist_songs WHERE playlistId = :playlistId AND videoId = :videoId")
-    suspend fun removeSong(playlistId: Long, videoId: String)
-
-    @Query("SELECT COUNT(*) FROM playlist_songs WHERE playlistId = :playlistId")
+    @Query("SELECT COUNT(*) FROM playlist_song_cross_ref WHERE playlistId = :playlistId")
     suspend fun countSongs(playlistId: Long): Int
 
     /**
-     * Phase 44: Count songs via CrossRef
-     */
-    @Query("SELECT COUNT(*) FROM playlist_song_cross_ref WHERE playlistId = :playlistId")
-    suspend fun countSongsNew(playlistId: Long): Int
-
-    /**
-     * Atomically wipe every playlist and every playlist_songs row so that no
-     * orphaned playlist_songs entries are left behind after the parent
-     * playlists table is cleared.
+     * Atomically wipe every playlist and every cross_ref row.
      */
     @Transaction
     suspend fun clearAll() {
         clearAllCrossRefs()
-        clearAllPlaylistSongs()
         clearAllPlaylists()
     }
 
     /**
-     * Atomically delete a single playlist together with all of its
-     * playlist_songs rows, avoiding the orphaned-row bug caused by two
-     * independent non-transactional DAO calls.
+     * Atomically delete a single playlist together with all of its cross_ref rows.
      */
     @Transaction
     suspend fun deletePlaylistWithSongs(id: Long) {
         clearCrossRefsForPlaylist(id)
-        clearPlaylistSongs(id)
         deletePlaylist(id)
     }
 }

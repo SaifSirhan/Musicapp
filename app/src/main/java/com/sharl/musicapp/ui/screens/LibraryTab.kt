@@ -34,7 +34,6 @@ import com.sharl.musicapp.data.LocalMedia
 import com.sharl.musicapp.data.NowPlaying
 import com.sharl.musicapp.data.Playlist
 import com.sharl.musicapp.data.PlaylistRepository
-import com.sharl.musicapp.data.PlaylistSong
 import com.sharl.musicapp.data.Profile
 import com.sharl.musicapp.data.SharedPlaylistSong
 import com.sharl.musicapp.data.Song
@@ -69,7 +68,7 @@ fun ColumnScope.LibraryTab(
     onCreatePlaylist: () -> Unit,
     onRequestRename: (String) -> Unit,
     onRequestDelete: () -> Unit,
-    onPlaylistSongMenu: (PlaylistSong) -> Unit,
+    onPlaylistSongMenu: (Song) -> Unit,
     onPlaylistMenu: (Playlist) -> Unit,
     favorites: List<Song>,
     onToggleFavorite: (Song) -> Unit,

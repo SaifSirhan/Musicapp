@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [Song::class, Playlist::class, PlaylistSong::class, PlaylistSongCrossRef::class, SpeedDialSlot::class, Download::class, LocalMedia::class],
-    version = 11,
+    entities = [Song::class, Playlist::class, PlaylistSongCrossRef::class, SpeedDialSlot::class, Download::class, LocalMedia::class],
+    version = 12,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -53,6 +53,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        // Phase 44b: Drop old playlist_songs table, migrate data to cross_ref
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Migrate existing data from playlist_songs to playlist_song_cross_ref
+                db.execSQL("""
+                    INSERT OR IGNORE INTO playlist_song_cross_ref (playlistId, videoId, position, addedAt)
+                    SELECT playlistId, videoId, 0, addedAt FROM playlist_songs
+                """)
+                // Drop old table
+                db.execSQL("DROP TABLE IF EXISTS playlist_songs")
+            }
+        }
+
         fun get(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -60,7 +73,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "musicapp.db"
                 )
-                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11)
+                    .addMigrations(MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }

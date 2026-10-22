@@ -35,7 +35,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
-import com.sharl.musicapp.data.PlaylistSong
+import com.sharl.musicapp.data.Song
 import com.sharl.musicapp.ui.components.Thumbnail
 import com.sharl.musicapp.ui.util.formatDate
 import com.sharl.musicapp.ui.util.youtubeThumb
@@ -56,14 +56,14 @@ fun thumbCell(url: String?, modifier: Modifier) {
 
 @Composable
 fun PlaylistSongsContent(
-    playlistSongs: List<PlaylistSong>,
+    playlistSongs: List<Song>,
     playlistName: String,
     playlistCreatedAt: Long,
     onBack: () -> Unit,
-    onPlayFromPlaylist: (List<PlaylistSong>, Int) -> Unit,
+    onPlayFromPlaylist: (List<Song>, Int) -> Unit,
     onRequestRename: () -> Unit,
     onRequestDelete: () -> Unit,
-    onSongMenu: (PlaylistSong) -> Unit,
+    onSongMenu: (Song) -> Unit,
     loadingVideoId: String? = null
 ) {
     val listState = rememberLazyListState()

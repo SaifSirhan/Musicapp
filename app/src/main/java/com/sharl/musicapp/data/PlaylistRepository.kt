@@ -20,13 +20,14 @@ class PlaylistRepository(context: Context) {
         artist: String,
         thumbnailUrl: String?
     ): Long {
-        val rowId = dao.addSong(
-            PlaylistSong(playlistId, videoId, title, artist, thumbnailUrl)
-        )
+        // Phase 44: Add to CrossRef with position based on count
+        val position = dao.countSongs(playlistId)
+        val ref = PlaylistSongCrossRef(playlistId, videoId, position)
+        val rowId = dao.addSongToPlaylist(ref)
         Log.d("PLAYLIST", "addSong playlistId=$playlistId videoId=$videoId rowId=$rowId")
         return rowId
     }
     suspend fun removeSong(playlistId: Long, videoId: String) =
-        dao.removeSong(playlistId, videoId)
+        dao.removeSongFromPlaylist(playlistId, videoId)
     fun songs(playlistId: Long) = dao.songsInPlaylist(playlistId)
 }

@@ -30,7 +30,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sharl.musicapp.data.Playlist
 import com.sharl.musicapp.data.PlaylistRepository
-import com.sharl.musicapp.data.PlaylistSong
 import com.sharl.musicapp.data.Song
 import kotlinx.coroutines.flow.first
 
@@ -41,13 +40,13 @@ fun PlaylistsScreen(
     playlistRepo: PlaylistRepository,
     onBack: () -> Unit,
     onOpenPlaylist: (Long) -> Unit,
-    onPlayFromPlaylist: (List<PlaylistSong>, Int) -> Unit,
+    onPlayFromPlaylist: (List<Song>, Int) -> Unit,
     onCreatePlaylist: () -> Unit,
     playlistName: String,
     playlistCreatedAt: Long,
     onRequestRename: () -> Unit,
     onRequestDelete: () -> Unit,
-    onSongMenu: (PlaylistSong) -> Unit,
+    onSongMenu: (Song) -> Unit,
     onPlaylistMenu: (Playlist) -> Unit = {},
     loadingVideoId: String? = null,
     onPreExtract: (String) -> Unit = {}

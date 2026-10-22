@@ -61,6 +61,7 @@ object Downloader {
     fun stateOf(videoId: String): DownloadState = _states.value[videoId] ?: DownloadState.Idle
 
     // Phase 43: Simple download for search results (uses defaults for missing metadata)
+    // Phase 44b: Simple download with .part temp files for search results
     suspend fun downloadSimple(
         context: Context,
         settings: SettingsRepo,
@@ -72,16 +73,19 @@ object Downloader {
         val appContext = context.applicationContext
         mutex.withLock {
             setState(videoId, DownloadState.Queued)
+            var partFile: File? = null
             try {
                 ensureInitialized(appContext)
                 val dir = settings.downloadDir(appContext)
-                val outputTemplate = File(dir, "%(id)s.%(ext)s").absolutePath
+                // Phase 44b: Download to .part file first
+                val partPath = File(dir, "$videoId.m4a.part").absolutePath
+                val finalPath = File(dir, "$videoId.m4a").absolutePath
 
                 val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId").apply {
                     addOption("--no-playlist")
                     addOption("--newline")
                     addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
-                    addOption("-o", outputTemplate)
+                    addOption("-o", partPath)
                     addOption("--print", "after_move:filepath")
                     addOption("--extractor-args",
                         "youtube:player_client=ios,tv,mweb,android_vr,web_embedded,tv_embedded")
@@ -105,18 +109,34 @@ object Downloader {
                     .filter { it.isNotEmpty() }
                     .lastOrNull()
 
-                val file = path?.let { File(it) }?.takeIf { it.exists() && it.length() > 0L }
-                if (file == null) {
+                partFile = path?.let { File(it) }?.takeIf { it.exists() && it.length() > 0L }
+                if (partFile == null) {
                     Log.e("DOWNLOAD", "downloadSimple produced no file for $videoId")
                     setState(videoId, DownloadState.Failed("No file created"))
+                    partFile?.delete()
                     return@withLock null
+                }
+
+                // Phase 44b: Verify and rename from .part to final
+                if (!partFile!!.exists() || partFile!!.length() == 0L) {
+                    partFile!!.delete()
+                    setState(videoId, DownloadState.Failed("Empty file"))
+                    return@withLock null
+                }
+
+                val finalFile = File(finalPath)
+                if (partFile!!.renameTo(finalFile)) {
+                    Log.d("DOWNLOAD", "Renamed ${partFile!!.name} to ${finalFile.name}")
+                } else {
+                    partFile!!.copyTo(finalFile, overwrite = true)
+                    partFile!!.delete()
                 }
 
                 // Add to downloads database
                 val download = Download(
                     videoId = videoId,
-                    filePath = file.absolutePath,
-                    fileSizeBytes = file.length(),
+                    filePath = finalFile.absolutePath,
+                    fileSizeBytes = finalFile.length(),
                     downloadedAt = System.currentTimeMillis(),
                     title = title,
                     artist = artist,
@@ -125,18 +145,20 @@ object Downloader {
                 )
                 repo(appContext).upsert(download)
                 
-                setState(videoId, DownloadState.Done(file))
-                Log.d("DOWNLOAD", "downloadSimple success: $videoId -> ${file.absolutePath}")
-                file
+                setState(videoId, DownloadState.Done(finalFile))
+                Log.d("DOWNLOAD", "downloadSimple success: $videoId -> ${finalFile.absolutePath}")
+                finalFile
             } catch (e: Exception) {
                 Log.e("DOWNLOAD", "downloadSimple failed for $videoId: ${e.message}", e)
+                // Phase 44b: Clean up .part file on failure
+                partFile?.takeIf { it.exists() }?.delete()
                 setState(videoId, DownloadState.Failed(e.message ?: "Unknown error"))
                 null
             }
         }
     }
 
-    // Phase 43: All downloads go to permanent library folder. No separate cache.
+    // Phase 44b: Safe download with .part temp files to prevent corruption
     suspend fun download(
         context: Context,
         settings: SettingsRepo,
@@ -149,16 +171,19 @@ object Downloader {
         val appContext = context.applicationContext
         mutex.withLock {
             setState(videoId, DownloadState.Queued)
+            var partFile: File? = null
             try {
                 ensureInitialized(appContext)
                 val dir = settings.downloadDir(appContext)
-                val outputTemplate = File(dir, "%(id)s.%(ext)s").absolutePath
-
+                // Phase 44b: Download to .part file first
+                val partPath = File(dir, "$videoId.m4a.part").absolutePath
+                val finalPath = File(dir, "$videoId.m4a").absolutePath
+                
                 val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId").apply {
                     addOption("--no-playlist")
                     addOption("--newline")
                     addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
-                    addOption("-o", outputTemplate)
+                    addOption("-o", partPath)
                     addOption("--print", "after_move:filepath")
                     addOption("--extractor-args",
                         "youtube:player_client=ios,tv,mweb,android_vr,web_embedded,tv_embedded")
@@ -177,21 +202,41 @@ object Downloader {
                     }
                 )
 
-                val finalPath = response.out
+                val path = response.out
                     .lineSequence()
                     .map { it.trim() }
                     .filter { it.isNotEmpty() }
                     .lastOrNull()
-                val file = finalPath?.let { File(it) }
-                if (file == null || !file.exists()) {
+                
+                partFile = path?.let { File(it) }?.takeIf { it.exists() && it.length() > 0L }
+                if (partFile == null) {
                     setState(videoId, DownloadState.Failed("download produced no file"))
+                    partFile?.delete()
                     throw IllegalStateException("download produced no file")
+                }
+
+                // Phase 44b: Verify file integrity, then rename from .part to final
+                if (!partFile!!.exists() || partFile!!.length() == 0L) {
+                    partFile!!.delete()
+                    setState(videoId, DownloadState.Failed("Empty file"))
+                    throw IllegalStateException("Download failed: empty file")
+                }
+
+                // Rename .part to final path
+                val finalFile = File(finalPath)
+                if (partFile!!.renameTo(finalFile)) {
+                    Log.d("DOWNLOAD", "Renamed ${partFile!!.name} to ${finalFile.name}")
+                } else {
+                    // Fallback: copy and delete
+                    partFile!!.copyTo(finalFile, overwrite = true)
+                    partFile!!.delete()
+                    Log.w("DOWNLOAD", "Rename failed, copied instead for $videoId")
                 }
 
                 val row = Download(
                     videoId = videoId,
-                    filePath = file.absolutePath,
-                    fileSizeBytes = file.length(),
+                    filePath = finalFile.absolutePath,
+                    fileSizeBytes = finalFile.length(),
                     downloadedAt = System.currentTimeMillis(),
                     title = title,
                     artist = artist,
@@ -199,11 +244,13 @@ object Downloader {
                     durationMs = durationMs
                 )
                 repo(appContext).upsert(row)
-                setState(videoId, DownloadState.Done(file))
-                Log.d("DOWNLOAD", "downloaded $videoId -> ${file.absolutePath}")
+                setState(videoId, DownloadState.Done(finalFile))
+                Log.d("DOWNLOAD", "downloaded $videoId -> ${finalFile.absolutePath}")
                 row
             } catch (e: Exception) {
                 Log.e("DOWNLOAD", "download failed for $videoId: ${e.message}", e)
+                // Phase 44b: Clean up .part file on failure
+                partFile?.takeIf { it.exists() }?.delete()
                 setState(videoId, DownloadState.Failed(e.message ?: "unknown error"))
                 throw e
             }
