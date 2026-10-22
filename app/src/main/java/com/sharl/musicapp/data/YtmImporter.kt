@@ -182,7 +182,12 @@ object YtmImporter {
         val json = runCatching { JSONObject(text) }.getOrNull()
         val error = json?.optString("error").orEmpty()
         val desc = json?.optString("error_description").orEmpty().trim()
-        val tail = if (desc.isBlank()) "" else " — ${desc.take(200)}"
+        val hint = when {
+            error == "invalid_client" -> " — Check GOOGLE_OAUTH_CLIENT_SECRET in secrets.properties."
+            error == "redirect_uri_mismatch" -> " — Register '${redirectUri()}' on the OAuth client."
+            else -> ""
+        }
+        val tail = if (desc.isBlank()) hint else " — ${desc.take(200)}$hint"
         return "Google token exchange failed (HTTP $code${if (error.isBlank()) "" else ", $error"})$tail"
     }
 

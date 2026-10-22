@@ -252,6 +252,9 @@ fun PlayerScreen(
     // In-flight queue rebuild. A new play request cancels it so rapid skips
     // can't race two setMediaItems calls against a stale queue index.
     var playJob by remember { mutableStateOf<Job?>(null) }
+    // Generation counter for rapid taps: each play request bumps it, and only
+    // the latest generation may apply its resolved window to the controller.
+    var playGeneration by remember { mutableStateOf(0L) }
     // Background warm-up of the following tracks into PlaybackCache; cancelled
     // by the next play request so stale tracks stop competing for the resolver.
     var prefetchJob by remember { mutableStateOf<Job?>(null) }
@@ -639,17 +642,21 @@ fun PlayerScreen(
     ): Pair<String, SongMetadata>? {
         val started = System.currentTimeMillis()
         val song = runCatching { repo.get(videoId) }.getOrNull()
-        val title = song?.title ?: fallbackTitle ?: videoId
-        val fast = InnerTubeHelper.getStreamUrl(videoId, immediateUse)
+        // Never show a raw video ID as the title. Prefer library → InnerTube
+        // metadata → yt-dlp; only fall back to the ID when all three are empty.
+        val fast = InnerTubeHelper.getStreamWithMetadata(videoId, immediateUse)
         if (fast != null) {
             ResolutionStats.recordFast(context)
             fastEngine = true
-            Log.d("RESOLVE", "InnerTube hit for $videoId in ${System.currentTimeMillis() - started}ms")
-            return fast to SongMetadata(
+            val elapsed = System.currentTimeMillis() - started
+            Log.d("RESOLVE", "InnerTube hit for $videoId in ${elapsed}ms")
+            val title = (fast.title ?: song?.title ?: fallbackTitle).orEmpty().ifBlank { videoId }
+            DiagnosticsManager.recordInnerTube(true, elapsed, InnerTubeHelper.lastClientLog)
+            return fast.url to SongMetadata(
                 title = title,
-                artist = song?.artist ?: "",
+                artist = fast.artist.ifBlank { song?.artist ?: "" },
                 album = song?.album,
-                thumbnailUrl = song?.thumbnailUrl ?: youtubeThumb(videoId)
+                thumbnailUrl = fast.thumbnailUrl ?: song?.thumbnailUrl ?: youtubeThumb(videoId)
             )
         }
         Log.w("RESOLVE", "InnerTube failed, falling back to yt-dlp ($videoId)")
@@ -987,6 +994,7 @@ fun PlayerScreen(
         // setMediaItems calls racing against different queue indices.
         playJob?.cancel()
         prefetchJob?.cancel()
+        val generation = ++playGeneration
         queue = items
         queueIndex = index
         val item = items[index]
@@ -1044,6 +1052,7 @@ fun PlayerScreen(
                 // A superseded request may finish extraction after cancellation;
                 // never apply its stale window.
                 ensureActive()
+                if (generation != playGeneration) return@launch
                 val (url, meta) = result
 
                 // Build the initial MediaItem window: the current track plus any
@@ -1735,6 +1744,21 @@ fun PlayerScreen(
                 },
                 onToggleFavorite = { song -> scope.launch { repo.toggleFavorite(song) } }
             )
+        } else if (showSignIn) {
+            androidx.activity.compose.BackHandler(enabled = true) { showSignIn = false }
+            SignInScreen(
+                configured = authRepo.configured,
+                externalError = friendsError,
+                onSignIn = { idToken, nonce ->
+                    friendsError = null
+                    scope.launch {
+                        runCatching { authRepo.signInWithGoogle(idToken, nonce) }
+                            .onSuccess { showSignIn = false }
+                            .onFailure { friendsError = it.message ?: "Sign-in failed." }
+                    }
+                },
+                onBack = { showSignIn = false }
+            )
         } else if (showSettings) {
             androidx.activity.compose.BackHandler(enabled = true) {
                 showSettings = false
@@ -1919,21 +1943,6 @@ fun PlayerScreen(
                     importRepo.cancel()
                     showImport = false
                 }
-            )
-        } else if (showSignIn) {
-            androidx.activity.compose.BackHandler(enabled = true) { showSignIn = false }
-            SignInScreen(
-                configured = authRepo.configured,
-                externalError = friendsError,
-                onSignIn = { idToken, nonce ->
-                    friendsError = null
-                    scope.launch {
-                        runCatching { authRepo.signInWithGoogle(idToken, nonce) }
-                            .onSuccess { showSignIn = false }
-                            .onFailure { friendsError = it.message ?: "Sign-in failed." }
-                    }
-                },
-                onBack = { showSignIn = false }
             )
         } else {
         Row(

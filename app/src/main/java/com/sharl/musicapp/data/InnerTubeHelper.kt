@@ -58,87 +58,68 @@ object InnerTubeHelper {
     private val clients = java.util.Collections.synchronizedList(mutableListOf<String>())
 
     /**
-     * [immediateUse] is set when any failure costs the user now (replaying a
-     * just-played track, prefetching the next one, seeking): the embedded
-     * client is then tried in the same call instead of waiting for the next.
+     * Returns the stream URL plus the video's title/artist when available.
+     * The player endpoint already returns this metadata; reading it avoids
+     * showing raw video IDs as titles when the library has no row for the track.
      */
-    suspend fun getStreamUrl(videoId: String, immediateUse: Boolean = false): String? =
-        withContext(Dispatchers.IO) {
-            val started = System.currentTimeMillis()
-            clients.clear()
-            ensureVisitorData()
-            var url = fetchBestAudioUrl(videoId, "IOS", IOS_CLIENT_VERSION, IOS_USER_AGENT)
-            if (url == null) {
-                url = fetchBestAudioUrl(videoId, "ANDROID_VR", CLIENT_VERSION, USER_AGENT, "Android")
-            }
-            if (url == null && immediateUse) {
-                url = fetchBestAudioUrl(
-                    videoId, "TVHTML5_SIMPLY_EMBEDDED_PLAYER", TV_CLIENT_VERSION, TV_USER_AGENT, "TV"
-                )
-            }
-            val elapsed = System.currentTimeMillis() - started
-            Log.d(
-                "InnerTube",
-                "getStreamUrl($videoId) -> ${if (url != null) "ok" else "failed"} " +
-                    "in ${elapsed}ms [$lastClientLog]"
-            )
-            DiagnosticsManager.recordInnerTube(url != null, elapsed, lastClientLog)
-            url
-        }
+    data class StreamInfo(
+        val url: String,
+        val title: String,
+        val artist: String,
+        val thumbnailUrl: String?
+    )
 
-    private fun note(client: String, detail: String) {
-        clients.add("$client $detail")
+    suspend fun getStreamWithMetadata(
+        videoId: String,
+        immediateUse: Boolean = false
+    ): StreamInfo? = withContext(Dispatchers.IO) {
+        clients.clear()
+        ensureVisitorData()
+        var json: JSONObject? = null
+        var url: String? = null
+        for (attempt in listOf(
+            Triple("IOS", IOS_CLIENT_VERSION, IOS_USER_AGENT),
+            Triple("ANDROID_VR", CLIENT_VERSION, USER_AGENT),
+            if (immediateUse) Triple("TVHTML5_SIMPLY_EMBEDDED_PLAYER", TV_CLIENT_VERSION, TV_USER_AGENT) else null
+        ).filterNotNull()) {
+            val (name, ver, ua) = attempt
+            val platform = when (name) {
+                "IOS" -> "IOS"
+                "ANDROID_VR" -> "Android"
+                else -> "TV"
+            }
+            val fetched = fetchBestAudioUrlAndJson(videoId, name, ver, ua, platform)
+            if (fetched != null) {
+                url = fetched.first
+                json = fetched.second
+                break
+            }
+        }
+        if (url == null || json == null) return@withContext null
+        val vd = json.optJSONObject("videoDetails")
+        val title = vd?.optString("title").orEmpty().ifBlank { videoId }
+        val author = vd?.optString("author").orEmpty()
+        val thumb = vd?.optJSONObject("thumbnail")
+            ?.optJSONArray("thumbnails")
+            ?.let { arr ->
+                // Pick the largest thumbnail available.
+                var best: String? = null
+                for (i in 0 until arr.length()) {
+                    val u = arr.optJSONObject(i)?.optString("url")
+                    if (!u.isNullOrBlank()) best = u
+                }
+                best
+            }
+        StreamInfo(url, title, author, thumb)
     }
 
-    private fun ensureVisitorData(): String? {
-        visitorData?.let { return it }
-        synchronized(this) {
-            visitorData?.let { return it }
-            try {
-                val conn = (URL("https://www.youtube.com/youtubei/v1/visitor_id?key=$API_KEY")
-                    .openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    setRequestProperty("Content-Type", "application/json")
-                    setRequestProperty("User-Agent", IOS_USER_AGENT)
-                    connectTimeout = 5000
-                    readTimeout = 5000
-                    doOutput = true
-                }
-                val body = JSONObject()
-                    .put(
-                        "context",
-                        JSONObject().put(
-                            "client",
-                            JSONObject()
-                                .put("clientName", "IOS")
-                                .put("clientVersion", IOS_CLIENT_VERSION)
-                        )
-                    )
-                    .toString()
-                conn.outputStream.write(body.toByteArray())
-                if (conn.responseCode == 200) {
-                    val json = JSONObject(conn.inputStream.bufferedReader().readText())
-                    visitorData = json.optJSONObject("responseContext")
-                        ?.optString("visitorData")
-                        ?.takeIf { it.isNotBlank() }
-                    Log.d("InnerTube", "visitorData ${if (visitorData != null) "acquired" else "missing"}")
-                } else {
-                    Log.w("InnerTube", "visitor_id HTTP ${conn.responseCode}")
-                }
-            } catch (e: Exception) {
-                Log.w("InnerTube", "visitor_id failed: ${e.message}")
-            }
-            return visitorData
-        }
-    }
-
-    private fun fetchBestAudioUrl(
+    private fun fetchBestAudioUrlAndJson(
         videoId: String,
         clientName: String,
         clientVersion: String,
         userAgent: String,
         platform: String = "IOS"
-    ): String? {
+    ): Pair<String, JSONObject>? {
         val started = System.currentTimeMillis()
         try {
             val key = if (platform == "TV") TV_API_KEY else API_KEY
@@ -148,8 +129,6 @@ object InnerTubeHelper {
             conn.setRequestProperty("Content-Type", "application/json")
             conn.setRequestProperty("User-Agent", userAgent)
             if (platform == "TV") {
-                // Embedded-player requests are origin-checked; without these the
-                // endpoint answers 403 regardless of the client config.
                 conn.setRequestProperty("Origin", TV_ORIGIN)
                 conn.setRequestProperty("Referer", "$TV_ORIGIN/")
             }
@@ -175,8 +154,6 @@ object InnerTubeHelper {
                         put("osVersion", "12")
                     }
                 }
-                // visitorData is minted by the iOS client; it is not shared with
-                // the embedded client, which has its own session.
                 if (platform != "TV") visitorData?.let { put("visitorData", it) }
             }
             val jsonBody = JSONObject()
@@ -228,8 +205,6 @@ object InnerTubeHelper {
                 return null
             }
 
-            // Find highest bitrate audio (m4a/webm), accepting both direct URLs
-            // and signatureCipher entries (some clients stopped sending "url").
             var bestUrl: String? = null
             var maxBitrate = 0
             var ciphered = 0
@@ -249,9 +224,6 @@ object InnerTubeHelper {
                     bestUrl = url
                 }
             }
-            // A ciphered signature cannot be signed without a JS player; the CDN
-            // answers it with 403. Report the client as failed so the caller skips
-            // it immediately instead of handing ExoPlayer a dead URL.
             if (ciphered > 0) {
                 note(clientName, "$ciphered ciphered")
                 Log.w("InnerTube", "$clientName sent $ciphered ciphered audio format(s) ($videoId)")
@@ -263,12 +235,71 @@ object InnerTubeHelper {
                 return null
             }
             note(clientName, "OK ${System.currentTimeMillis() - started}ms")
-            return bestUrl
+            return bestUrl to json
         } catch (e: Exception) {
             note(clientName, "error ${e.javaClass.simpleName}")
             Log.e("InnerTube", "Fast extraction failed ($clientName)", e)
         }
         return null
+    }
+
+    suspend fun getStreamUrl(videoId: String, immediateUse: Boolean = false): String? {
+        val started = System.currentTimeMillis()
+        val info = getStreamWithMetadata(videoId, immediateUse)
+        val elapsed = System.currentTimeMillis() - started
+        Log.d(
+            "InnerTube",
+            "getStreamUrl($videoId) -> ${if (info != null) "ok" else "failed"} " +
+                "in ${elapsed}ms [$lastClientLog]"
+        )
+        DiagnosticsManager.recordInnerTube(info != null, elapsed, lastClientLog)
+        return info?.url
+    }
+
+    private fun note(client: String, detail: String) {
+        clients.add("$client $detail")
+    }
+
+    private fun ensureVisitorData(): String? {
+        visitorData?.let { return it }
+        synchronized(this) {
+            visitorData?.let { return it }
+            try {
+                val conn = (URL("https://www.youtube.com/youtubei/v1/visitor_id?key=$API_KEY")
+                    .openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("User-Agent", IOS_USER_AGENT)
+                    connectTimeout = 5000
+                    readTimeout = 5000
+                    doOutput = true
+                }
+                val body = JSONObject()
+                    .put(
+                        "context",
+                        JSONObject().put(
+                            "client",
+                            JSONObject()
+                                .put("clientName", "IOS")
+                                .put("clientVersion", IOS_CLIENT_VERSION)
+                        )
+                    )
+                    .toString()
+                conn.outputStream.write(body.toByteArray())
+                if (conn.responseCode == 200) {
+                    val json = JSONObject(conn.inputStream.bufferedReader().readText())
+                    visitorData = json.optJSONObject("responseContext")
+                        ?.optString("visitorData")
+                        ?.takeIf { it.isNotBlank() }
+                    Log.d("InnerTube", "visitorData ${if (visitorData != null) "acquired" else "missing"}")
+                } else {
+                    Log.w("InnerTube", "visitor_id HTTP ${conn.responseCode}")
+                }
+            } catch (e: Exception) {
+                Log.w("InnerTube", "visitor_id failed: ${e.message}")
+            }
+            return visitorData
+        }
     }
 
     private fun formatUrl(format: JSONObject): String {
