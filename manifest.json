@@ -1,7 +1,7 @@
 {
-  "versionCode": 19,
-  "versionName": "0.18.0",
-  "apkUrl": "https://github.com/SaifSirhan/Musicapp/releases/download/v0.18.0/app-release.apk",
-  "sha256": "deaa2c8b4b370e68daaa22b6bc5335f567c8e6252c4f11d120278ef0547fbcdf",
-  "notes": "Phase 27: hidden Diagnostics screen (tap the version line 7 times in Settings), 4-track prefetch that starts before the current track resolves, InnerTube TVHTML5_SIMPLY_EMBEDDED_PLAYER fallback, and ciphered-only audio treated as a failed client instead of a 403 in the player. Phase 27b: search now uses InnerTube instead of yt-dlp."
+  "versionCode": 20,
+  "versionName": "0.19.0",
+  "apkUrl": "https://github.com/SaifSirhan/Musicapp/releases/download/v0.19.0/app-release.apk",
+  "sha256": "5198f75ba7c1ab6d15e6e6f3ece34921f6e0a31863e98f16d599236712e5297e",
+  "notes": "Playback failures now report the real cause (HTTP status and ExoPlayer error code) instead of a blanket \"YouTube API blocked\". YouTube Music import uses the browser OAuth flow so any Google account can be chosen; it needs GOOGLE_OAUTH_REDIRECT_URI and GOOGLE_OAUTH_CLIENT_SECRET configured to connect. Test-only probes removed."
 }
