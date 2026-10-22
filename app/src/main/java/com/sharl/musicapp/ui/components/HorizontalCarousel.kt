@@ -47,7 +47,7 @@ fun HorizontalCarousel(
     if (songs.isEmpty()) return
     Column(modifier = Modifier
         .fillMaxWidth()
-        .padding(vertical = 12.dp)) {
+        .padding(vertical = 8.dp)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -56,10 +56,10 @@ fun HorizontalCarousel(
         ) {
             Text(
                 title,
-                style = MaterialTheme.typography.titleLarge,
+                style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier
                     .weight(1f)
-                    .padding(bottom = 12.dp)
+                    .padding(bottom = 6.dp)
             )
             if (actionLabel != null && onAction != null) {
                 TextButton(onClick = onAction) {
@@ -73,24 +73,24 @@ fun HorizontalCarousel(
             items(songs, key = { it.videoId }) { song ->
                 Column(
                     modifier = Modifier
-                        .width(160.dp)
-                        .padding(end = 12.dp)
+                        .width(100.dp)
+                        .padding(end = 8.dp)
                         .clickable { onSongClick(song) }
                 ) {
-                    Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), 160.dp)
-                    Spacer(Modifier.height(8.dp))
+                    Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), 100.dp)
+                    Spacer(Modifier.height(4.dp))
                     Text(
                         song.title,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
                         song.artist,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }

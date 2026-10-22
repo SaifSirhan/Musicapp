@@ -22,10 +22,36 @@ class SongRepository(context: Context) {
                 videoId = videoId,
                 title = title,
                 artist = artist,
-                album = album,
-                thumbnailUrl = thumbnailUrl,
+                album = album ?: existing?.album,
+                trackNumber = existing?.trackNumber,
+                thumbnailUrl = thumbnailUrl ?: existing?.thumbnailUrl,
                 lastPlayedAt = now,
                 playCount = (existing?.playCount ?: 0) + 1,
+                isFavorite = existing?.isFavorite ?: false,
+                isHidden = existing?.isHidden ?: false
+            )
+        )
+    }
+
+    suspend fun saveDownloadedSong(
+        videoId: String,
+        title: String,
+        artist: String,
+        album: String?,
+        thumbnailUrl: String?,
+        trackNumber: Int? = null
+    ) {
+        val existing = dao.getById(videoId)
+        dao.upsert(
+            Song(
+                videoId = videoId,
+                title = title,
+                artist = artist,
+                album = album ?: existing?.album,
+                trackNumber = trackNumber ?: existing?.trackNumber,
+                thumbnailUrl = thumbnailUrl ?: existing?.thumbnailUrl,
+                lastPlayedAt = existing?.lastPlayedAt ?: 0L,
+                playCount = existing?.playCount ?: 0,
                 isFavorite = existing?.isFavorite ?: false,
                 isHidden = existing?.isHidden ?: false
             )

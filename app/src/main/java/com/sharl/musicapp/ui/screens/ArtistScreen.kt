@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,9 +15,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -48,7 +52,8 @@ fun ArtistScreen(
     context: Context,
     scope: CoroutineScope,
     onPlay: (List<QueueItem>, Int) -> Unit,
-    onDownload: (String, String, String) -> Unit, // videoId, title, artist
+    // videoId, title, artist, album, track number
+    onDownload: (String, String, String, String?, Int?) -> Unit,
     downloadedIds: Set<String>,
     onDownloadDiscography: (String) -> Unit,
     onBack: () -> Unit
@@ -98,6 +103,14 @@ fun ArtistScreen(
         albumTracksLoading = false
     }
 
+    val localAlbums = remember(localSongs) {
+        localSongs.mapNotNull { it.album?.trim()?.takeIf { a -> a.isNotEmpty() } }
+            .distinctBy { it.lowercase() }
+    }
+    val chipAlbums = remember(localAlbums, albums) {
+        (localAlbums + albums.map { it.title }).distinctBy { it.lowercase() }
+    }
+
     val album = selectedAlbum
     if (album != null) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -126,28 +139,107 @@ fun ArtistScreen(
                 }
             }
             HorizontalDivider()
+
+            val localAlbumSongs = remember(localSongs, albumTracks, album.title) {
+                localSongs.filter { song ->
+                    song.album?.equals(album.title, ignoreCase = true) == true ||
+                        albumTracks.any { it.videoId == song.videoId }
+                }.distinctBy { it.videoId }
+            }
+            // Prefer the remote album search order: it follows the tracklist.
+            // Local-only rows fall back to their persisted track numbers.
+            val orderedLocalSongs = remember(localAlbumSongs, albumTracks) {
+                if (albumTracks.isNotEmpty()) {
+                    val byRemoteOrder = albumTracks.mapNotNull { track ->
+                        localAlbumSongs.firstOrNull { it.videoId == track.videoId }
+                    }
+                    val extra = localAlbumSongs
+                        .filter { song -> albumTracks.none { it.videoId == song.videoId } }
+                        .sortedBy { it.trackNumber ?: Int.MAX_VALUE }
+                    (byRemoteOrder + extra).distinctBy { it.videoId }
+                } else {
+                    localAlbumSongs.sortedBy { it.trackNumber ?: Int.MAX_VALUE }
+                }
+            }
+            val missingTracks = albumTracks.filter { track ->
+                localAlbumSongs.none { it.videoId == track.videoId }
+            }
+
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 item {
                     val downloadable = albumTracks.filter { it.videoId !in downloadedIds }
-                    val allDownloaded = albumTracks.isNotEmpty() && downloadable.isEmpty()
+                    val allDownloaded = downloadable.isEmpty() && orderedLocalSongs.isNotEmpty()
                     Button(
                         onClick = {
-                            downloadable.forEach { t ->
-                                onDownload(t.videoId, t.title, artistName)
+                            downloadable.forEachIndexed { idx, t ->
+                                onDownload(t.videoId, t.title, artistName, album.title, idx + 1)
                             }
                         },
                         enabled = downloadable.isNotEmpty(),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(16.dp)
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
                     ) {
                         Text(
                             when {
-                                albumTracks.isEmpty() -> "Download Album"
                                 allDownloaded -> "Album downloaded"
+                                albumTracks.isEmpty() -> "Download Album"
                                 else -> "Download Album (${downloadable.size})"
                             }
                         )
+                    }
+                }
+                if (orderedLocalSongs.isNotEmpty()) {
+                    item {
+                        Button(
+                            onClick = {
+                                onPlay(
+                                    orderedLocalSongs.map {
+                                        QueueItem(it.videoId, it.title, it.artist)
+                                    },
+                                    0
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 4.dp)
+                        ) {
+                            Text("▶  Play Album (${orderedLocalSongs.size})")
+                        }
+                    }
+                    itemsIndexed(orderedLocalSongs, key = { _, song -> song.videoId }) { idx, song ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onPlay(
+                                        orderedLocalSongs.map {
+                                            QueueItem(it.videoId, it.title, it.artist)
+                                        },
+                                        idx
+                                    )
+                                }
+                                .padding(vertical = 6.dp, horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "${song.trackNumber ?: (idx + 1)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.width(24.dp)
+                            )
+                            Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), 48.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                song.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text("✓", color = MaterialTheme.colorScheme.primary)
+                        }
+                        HorizontalDivider()
                     }
                 }
                 if (albumTracksLoading) {
@@ -161,9 +253,17 @@ fun ArtistScreen(
                             CircularProgressIndicator()
                         }
                     }
-                } else {
-                    items(albumTracks, key = { it.videoId }) { result ->
-                        val isDownloaded = result.videoId in downloadedIds
+                } else if (missingTracks.isNotEmpty()) {
+                    if (orderedLocalSongs.isNotEmpty()) {
+                        item {
+                            Text(
+                                "Not downloaded",
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        }
+                    }
+                    itemsIndexed(missingTracks, key = { _, result -> result.videoId }) { idx, result ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -179,22 +279,24 @@ fun ArtistScreen(
                                 style = MaterialTheme.typography.bodyMedium,
                                 modifier = Modifier.weight(1f)
                             )
-                            if (isDownloaded) {
-                                Text("✓", color = MaterialTheme.colorScheme.primary)
-                            } else {
-                                IconButton(
-                                    onClick = {
-                                        onDownload(result.videoId, result.title, artistName)
-                                    }
-                                ) {
-                                    Text("⬇", style = MaterialTheme.typography.titleLarge)
+                            IconButton(
+                                onClick = {
+                                    onDownload(
+                                        result.videoId,
+                                        result.title,
+                                        artistName,
+                                        album.title,
+                                        idx + 1
+                                    )
                                 }
+                            ) {
+                                Text("⬇", style = MaterialTheme.typography.titleLarge)
                             }
                         }
                         HorizontalDivider()
                     }
                 }
-                if (!albumTracksLoading && albumTracks.isEmpty()) {
+                if (!albumTracksLoading && albumTracks.isEmpty() && orderedLocalSongs.isEmpty()) {
                     item {
                         Text(
                             "No tracks found for this album.",
@@ -239,7 +341,46 @@ fun ArtistScreen(
                         .fillMaxWidth()
                         .padding(start = 16.dp, end = 16.dp, top = 12.dp)
                 ) {
-                    Text("⬇  Download Discography")
+                    Text("⬇  Download All")
+                }
+            }
+
+            if (chipAlbums.isNotEmpty()) {
+                item {
+                    Column(modifier = Modifier.padding(top = 12.dp)) {
+                        Text(
+                            "Albums",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                        )
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            item {
+                                FilterChip(
+                                    selected = true,
+                                    onClick = {},
+                                    label = { Text("All") }
+                                )
+                            }
+                            items(chipAlbums, key = { it }) { title ->
+                                FilterChip(
+                                    selected = false,
+                                    onClick = {
+                                        val remote = albums.firstOrNull {
+                                            it.title.equals(title, ignoreCase = true)
+                                        }
+                                        selectedAlbum = remote
+                                            ?: AlbumResult(title = title, videoId = "", thumbnailUrl = null)
+                                    },
+                                    label = {
+                                        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -405,7 +546,7 @@ fun ArtistScreen(
                         }
                         IconButton(
                             onClick = {
-                                onDownload(result.videoId, result.title, artistName)
+                                onDownload(result.videoId, result.title, artistName, null, null)
                             }
                         ) {
                             Text("⬇", style = MaterialTheme.typography.titleLarge)

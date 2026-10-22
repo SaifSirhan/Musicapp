@@ -3,7 +3,6 @@ package com.sharl.musicapp.ui.screens
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -20,7 +19,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -121,9 +119,7 @@ fun NowPlayingScreen(
     onToggleFavorite: () -> Unit = {},
     onAddToPlaylist: () -> Unit = {},
     onShare: () -> Unit = {},
-    onDownload: () -> Unit = {},
     isFavorite: Boolean = false,
-    isDownloaded: Boolean = false,
     downloadedIds: Set<String> = emptySet(),
     onDownloadTrack: (QueueItem) -> Unit = {}
 ) {
@@ -133,8 +129,10 @@ fun NowPlayingScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .fillMaxWidth()
             .background(MaterialTheme.colorScheme.background)
-            .padding(horizontal = 16.dp, vertical = 16.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // Top bar: back on the left, "not interested" on the right
         Row(
@@ -250,11 +248,11 @@ fun NowPlayingScreen(
                                 .clip(RoundedCornerShape(12.dp))
                         )
                     } else {
-                        val artSize = minOf(maxWidth * 0.85f, maxHeight * 0.85f)
+                        val artSize = minOf(maxWidth * 0.94f, maxHeight * 0.95f)
                         Thumbnail(thumbnailUrl, artSize)
                     }
                 }
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // Title and artist, centered with proper typography
                 Text(
@@ -269,9 +267,9 @@ fun NowPlayingScreen(
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp)
+                        .padding(horizontal = 8.dp)
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = displayArtist,
                     style = MaterialTheme.typography.bodyMedium,
@@ -282,7 +280,7 @@ fun NowPlayingScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable(enabled = displayArtist != "Unknown Artist", onClick = onArtistClick)
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
                 )
                 if (isLoading && showExtracting) {
                     Spacer(modifier = Modifier.height(8.dp))
@@ -295,7 +293,7 @@ fun NowPlayingScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // Video/audio toggle with larger touch target
                 Row(
@@ -556,19 +554,14 @@ fun NowPlayingScreen(
             )
         }
 
-        // Action row: Download, Favourite, Add to playlist (horizontally scrollable)
+        // Action row: Favourite, Playlist, Share
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 8.dp)
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            ActionPillButton(
-                icon = if (isDownloaded) "🗑" else "⬇",
-                label = if (isDownloaded) "Remove" else "Download",
-                onClick = onDownload
-            )
             ActionPillButton(
                 icon = if (isFavorite) "♥" else "♡",
                 label = if (isFavorite) "Favourited" else "Favourite",
@@ -586,23 +579,24 @@ fun NowPlayingScreen(
             )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
         // Transport controls: Shuffle | Previous | −15s | Play | +15s | Next | Repeat
+        // Every control gets an equal share of the row so the Repeat button
+        // cannot be pushed off-screen on narrow displays.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceEvenly
+                .padding(horizontal = 2.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             TransportButton(
                 onClick = onShuffleToggle,
-                modifier = Modifier.size(48.dp)
+                modifier = Modifier.weight(1f).height(48.dp)
             ) {
                 Text(
-                    "🔀",
-                    style = MaterialTheme.typography.titleMedium,
+                    "⇄",
+                    style = MaterialTheme.typography.titleLarge,
                     color = if (isShuffled)
                         MaterialTheme.colorScheme.primary
                     else
@@ -611,7 +605,7 @@ fun NowPlayingScreen(
             }
             TransportButton(
                 onClick = onSkipPrevious,
-                modifier = Modifier.size(48.dp)
+                modifier = Modifier.weight(1f).height(48.dp)
             ) {
                 Text(
                     "⏮",
@@ -621,7 +615,7 @@ fun NowPlayingScreen(
             }
             TransportButton(
                 onClick = onSkipBack,
-                modifier = Modifier.size(48.dp)
+                modifier = Modifier.weight(1f).height(48.dp)
             ) {
                 Text(
                     "−${skipSeconds}s",
@@ -633,30 +627,37 @@ fun NowPlayingScreen(
             // Play/Pause button - larger and more prominent
             Box(
                 modifier = Modifier
-                    .size(64.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary)
-                    .clickable(enabled = !isLoading) { onPlayPause() },
+                    .weight(1f)
+                    .height(56.dp),
                 contentAlignment = Alignment.Center
             ) {
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(28.dp),
-                        strokeWidth = 3.dp,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
-                } else {
-                    TransportIcon(
-                        kind = if (isPlaying) TransportKind.Pause else TransportKind.Play,
-                        size = 32.dp,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary)
+                        .clickable(enabled = !isLoading) { onPlayPause() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(26.dp),
+                            strokeWidth = 3.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    } else {
+                        TransportIcon(
+                            kind = if (isPlaying) TransportKind.Pause else TransportKind.Play,
+                            size = 28.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    }
                 }
             }
-            
+
             TransportButton(
                 onClick = onSkipForward,
-                modifier = Modifier.size(48.dp)
+                modifier = Modifier.weight(1f).height(48.dp)
             ) {
                 Text(
                     "+${skipSeconds}s",
@@ -666,7 +667,7 @@ fun NowPlayingScreen(
             }
             TransportButton(
                 onClick = onSkipNext,
-                modifier = Modifier.size(48.dp)
+                modifier = Modifier.weight(1f).height(48.dp)
             ) {
                 Text(
                     "⏭",
@@ -676,16 +677,13 @@ fun NowPlayingScreen(
             }
             TransportButton(
                 onClick = onRepeatToggle,
-                modifier = Modifier.size(48.dp)
+                modifier = Modifier.weight(1f).height(48.dp)
             ) {
-                val glyph = when (repeatMode) {
-                    1 -> "🔁"
-                    2 -> "🔂"
-                    else -> "🔁"
-                }
+                // Monochrome glyphs so the tint reflects repeatMode; emoji
+                // glyphs always render in their own colors and hid the state.
                 Text(
-                    glyph,
-                    style = MaterialTheme.typography.titleMedium,
+                    if (repeatMode == 2) "↻1" else "↻",
+                    style = MaterialTheme.typography.titleLarge,
                     color = if (repeatMode == 0)
                         MaterialTheme.colorScheme.onSurfaceVariant
                     else
@@ -694,7 +692,7 @@ fun NowPlayingScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
         if (showSpeedDialog) {
             AlertDialog(

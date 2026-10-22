@@ -45,6 +45,23 @@ interface SongDao {
     @Query("SELECT * FROM songs WHERE isHidden = 0 AND artist = :artistName ORDER BY lastPlayedAt DESC")
     fun getSongsByArtist(artistName: String): Flow<List<Song>>
 
+    @Query("""
+        SELECT * FROM songs
+        WHERE isHidden = 0 AND artist = :artist AND album = :album
+        ORDER BY CASE WHEN trackNumber IS NULL THEN 1 ELSE 0 END,
+                 trackNumber,
+                 title COLLATE NOCASE
+    """)
+    fun getSongsByArtistAndAlbum(artist: String, album: String): Flow<List<Song>>
+
+    @Query("""
+        SELECT DISTINCT album FROM songs
+        WHERE isHidden = 0 AND artist = :artist
+          AND album IS NOT NULL AND album != ''
+        ORDER BY album COLLATE NOCASE
+    """)
+    fun albumsByArtist(artist: String): Flow<List<String>>
+
     @Query("SELECT * FROM songs WHERE isHidden = 0 ORDER BY title COLLATE NOCASE")
     fun allSongs(): Flow<List<Song>>
 

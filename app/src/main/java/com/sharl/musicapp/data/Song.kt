@@ -9,6 +9,7 @@ data class Song(
     val title: String,
     val artist: String,
     val album: String? = null,
+    val trackNumber: Int? = null,
     val thumbnailUrl: String? = null,
     val lastPlayedAt: Long,
     val playCount: Int,

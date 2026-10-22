@@ -36,9 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.sharl.musicapp.ImportService
-import com.sharl.musicapp.data.SettingsRepo
 import com.sharl.musicapp.data.SpotifyImporter
-import com.sharl.musicapp.data.YtmImporter
 import com.sharl.musicapp.importer.ImportManager
 import com.sharl.musicapp.importer.ImportState
 import com.sharl.musicapp.ui.components.SettingsSectionHeader
@@ -48,19 +46,18 @@ import org.json.JSONObject
 import kotlin.coroutines.resume
 
 /**
- * Account import: connects Spotify (Authorization Code) and YouTube Music
- * (Google Authorization API), lets the user pick playlists, and hands the
- * selected tracks to [ImportService] which does the yt-dlp resolution.
+ * Account import: connects Spotify (Authorization Code), lets the user pick
+ * playlists, and hands the selected tracks to [ImportService] which does the
+ * yt-dlp resolution. YouTube login is not offered because Google restricts
+ * this app's OAuth client; link import covers that case.
  */
 @Composable
 fun ImportAccountScreen(
-    signedIn: Boolean,
-    accountEmail: String?,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenLinkImport: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val settings = remember { SettingsRepo(context.applicationContext) }
 
     val spotifyConnected by SpotifyImporter.connected.collectAsState()
     val spotifyError by SpotifyImporter.error.collectAsState()
@@ -68,26 +65,11 @@ fun ImportAccountScreen(
 
     var spotifyPlaylists by remember { mutableStateOf<List<SpotifyImporter.Playlist>>(emptyList()) }
     var spotifyLoading by remember { mutableStateOf(false) }
-    var ytmPlaylists by remember { mutableStateOf<List<YtmImporter.Playlist>>(emptyList()) }
-    var ytmLoading by remember { mutableStateOf(false) }
-    var ytmToken by remember {
-        mutableStateOf(settings.googleAccessToken.takeIf { settings.hasFreshGoogleToken() })
-    }
     var status by remember { mutableStateOf<String?>(null) }
     var localError by remember { mutableStateOf<String?>(null) }
     val selected = remember { mutableStateMapOf<String, Boolean>() }
 
     val running = importState is ImportState.Running
-
-    fun disconnectYoutube() {
-        localError = null
-        // Clear local state first so the UI reacts immediately.
-        settings.clearGoogleAccessToken()
-        ytmToken = null
-        ytmPlaylists = emptyList()
-        selected.keys.filter { it.startsWith("ytm:") }.forEach { selected.remove(it) }
-        localError = "YouTube disconnected. Tap Connect YouTube Music to choose an account."
-    }
 
     LaunchedEffect(spotifyConnected) {
         if (!spotifyConnected) return@LaunchedEffect
@@ -96,21 +78,6 @@ fun ImportAccountScreen(
             .onSuccess { spotifyPlaylists = it }
             .onFailure { localError = it.message ?: "Could not load Spotify playlists." }
         spotifyLoading = false
-    }
-
-    LaunchedEffect(ytmToken) {
-        val token = ytmToken ?: return@LaunchedEffect
-        ytmLoading = true
-        runCatching { YtmImporter.fetchPlaylists(token) }
-            .onSuccess { ytmPlaylists = it }
-            .onFailure {
-                localError = it.message ?: "Could not load YouTube Music playlists."
-                if (it.message?.contains("expired") == true) {
-                    settings.clearGoogleAccessToken()
-                    ytmToken = null
-                }
-            }
-        ytmLoading = false
     }
 
     fun startImport() {
@@ -140,31 +107,6 @@ fun ImportAccountScreen(
                                 .put("name", "Spotify: ${p.name}")
                                 .put("queries", JSONArray(queries))
                         )
-                    }
-                }
-                val token = ytmToken
-                if (token != null) {
-                    for (p in ytmPlaylists) {
-                        if (selected["ytm:${p.id}"] != true) continue
-                        status = "Fetching ${p.title}…"
-                        val tracks = YtmImporter.fetchPlaylistTracks(token, p.id)
-                        if (tracks.isNotEmpty()) {
-                            val arr = JSONArray()
-                            tracks.forEach { t ->
-                                arr.put(
-                                    JSONObject()
-                                        .put("videoId", t.videoId)
-                                        .put("title", t.title)
-                                        .put("artist", t.artist)
-                                        .put("thumbnailUrl", t.thumbnailUrl ?: "")
-                                )
-                            }
-                            jobs.put(
-                                JSONObject()
-                                    .put("name", "YT Music: ${p.title}")
-                                    .put("tracks", arr)
-                            )
-                        }
                     }
                 }
                 status = null
@@ -203,9 +145,9 @@ fun ImportAccountScreen(
         HorizontalDivider()
 
         Text(
-            "Pick playlists from Spotify or YouTube Music. Tracks are matched " +
-                "with YouTube search, so an import of 500 songs takes a few minutes " +
-                "and keeps running in the background.",
+            "Pick playlists from Spotify, or import any public YouTube or Spotify " +
+                "playlist by link. Tracks are matched with YouTube search, so an " +
+                "import of 500 songs takes a few minutes and keeps running in the background.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(vertical = 8.dp)
@@ -315,58 +257,18 @@ fun ImportAccountScreen(
         HorizontalDivider()
 
         SettingsSectionHeader("YouTube Music")
-        if (ytmToken == null) {
-            // Account import is temporarily unavailable: Google rejects the
-            // TVHTML5 device-flow client with restricted_client. Link import
-            // (Import → paste a link) does not need OAuth and stays available.
-            Text(
-                "YouTube account import is temporarily unavailable. Use " +
-                    "\"Import a link\" to paste a YouTube or Spotify playlist URL instead.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            (localError)?.let {
-                Text(
-                    it,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-        } else {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "YouTube connected" + (accountEmail?.let { " ($it)" } ?: ""),
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f)
-                )
-                TextButton(onClick = { disconnectYoutube() }) { Text("Disconnect") }
-            }
-            if (ytmLoading) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Loading playlists…", style = MaterialTheme.typography.bodySmall)
-                }
-            } else if (ytmPlaylists.isEmpty()) {
-                Text(
-                    "No playlists found on this YouTube account.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
-                ytmPlaylists.forEach { p ->
-                    CheckRow(
-                        label = p.title,
-                        detail = if (p.itemCount > 0) "${p.itemCount} tracks" else null,
-                        checked = selected["ytm:${p.id}"] == true,
-                        onCheckedChange = { selected["ytm:${p.id}"] = it }
-                    )
-                }
-            }
+        Text(
+            "Direct YouTube login is currently restricted by Google. " +
+                "Please use the Playlist Link Import below.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(8.dp))
+        Button(
+            onClick = onOpenLinkImport,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Import a Playlist Link")
         }
         HorizontalDivider()
 

@@ -511,22 +511,35 @@ fun PlayerScreen(
                         YtdlpHelper.albumTrackQuery(artist, album.title),
                         limit = 12
                     )
-                    tracks.filter { it.videoId !in downloadIds }.forEach { t ->
-                        try {
-                            Downloader.downloadSimple(
-                                context,
-                                settings,
-                                t.videoId,
-                                t.title,
-                                artist,
-                                youtubeThumb(t.videoId)
-                            )
-                            downloaded++
-                        } catch (e: Exception) {
-                            failed++
-                            Log.w("DISC", "discography download failed for ${t.videoId}", e)
+                    tracks.filter { it.videoId !in downloadIds }
+                        .forEachIndexed { trackIdx, t ->
+                            try {
+                                val file = Downloader.downloadSimple(
+                                    context,
+                                    settings,
+                                    t.videoId,
+                                    t.title,
+                                    artist,
+                                    youtubeThumb(t.videoId)
+                                )
+                                if (file != null) {
+                                    repo.saveDownloadedSong(
+                                        t.videoId,
+                                        t.title,
+                                        artist,
+                                        album.title,
+                                        youtubeThumb(t.videoId),
+                                        trackIdx + 1
+                                    )
+                                    downloaded++
+                                } else {
+                                    failed++
+                                }
+                            } catch (e: Exception) {
+                                failed++
+                                Log.w("DISC", "discography download failed for ${t.videoId}", e)
+                            }
                         }
-                    }
                 }
                 status = "Discography done: $downloaded downloaded" +
                     if (failed > 0) ", $failed failed" else ""
@@ -1609,14 +1622,23 @@ fun PlayerScreen(
                 context = context,
                 scope = scope,
                 onPlay = { items, index -> playFromQueue(items, index) },
-                onDownload = { videoId, title, artist ->
+                onDownload = { videoId, title, artist, album, trackNumber ->
                     // Phase 43: Trigger permanent download to library
                     status = "Downloading to Library..."
                     loadingVideoId = videoId
                     scope.launch {
                         try {
-                            Downloader.downloadSimple(context, settings, videoId, title, artist, youtubeThumb(videoId))
-                            status = "Downloaded: $title"
+                            val file = Downloader.downloadSimple(
+                                context, settings, videoId, title, artist, youtubeThumb(videoId)
+                            )
+                            if (file != null) {
+                                repo.saveDownloadedSong(
+                                    videoId, title, artist, album, youtubeThumb(videoId), trackNumber
+                                )
+                                status = "Downloaded: $title"
+                            } else {
+                                status = "Download failed: $title"
+                            }
                         } catch (e: Exception) {
                             status = "Download failed: ${e.message}"
                         } finally {
@@ -1772,7 +1794,6 @@ fun PlayerScreen(
                     }
                 },
                 isFavorite = currentSong?.isFavorite == true,
-                isDownloaded = currentVideoId != null && downloadIds.contains(currentVideoId),
                 downloadedIds = downloadIds.toSet(),
                 onDownloadTrack = { q ->
                     startDownload(q.videoId, q.title, q.artist, null, 0L)
@@ -1784,25 +1805,6 @@ fun PlayerScreen(
                 },
                 onAddToPlaylist = {
                     currentSong?.let { showAddToPlaylist = it }
-                },
-                onDownload = {
-                    val vid = currentVideoId
-                    if (vid != null) {
-                        if (downloadIds.contains(vid)) {
-                            scope.launch {
-                                downloadRepo.get(vid)?.let { Downloader.remove(context, it) }
-                                status = "Removed download"
-                            }
-                        } else {
-                            startDownload(
-                                vid,
-                                nowPlayingTitle ?: currentTrack?.title ?: "",
-                                nowPlayingArtist ?: currentTrack?.artist ?: "",
-                                nowPlayingThumbnail,
-                                0L
-                            )
-                        }
-                    }
                 },
                 onShare = {
                     val vid = currentVideoId
@@ -1987,11 +1989,14 @@ fun PlayerScreen(
                 showSettings = true
             }
             ImportAccountScreen(
-                signedIn = signedIn,
-                accountEmail = authRepo.currentUserEmail(),
                 onBack = {
                     showImportAccount = false
                     showSettings = true
+                },
+                onOpenLinkImport = {
+                    showImportAccount = false
+                    importRepo.reset()
+                    showImport = true
                 }
             )
         } else if (showNewDropsAll) {
