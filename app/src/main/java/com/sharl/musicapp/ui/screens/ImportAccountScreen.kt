@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -83,6 +84,10 @@ fun ImportAccountScreen(
     var localError by remember { mutableStateOf<String?>(null) }
     val selected = remember { mutableStateMapOf<String, Boolean>() }
 
+    // Device flow state
+    var showDeviceCodeDialog by remember { mutableStateOf(false) }
+    var deviceCodeInfo by remember { mutableStateOf<YtmImporter.DeviceCodeResponse?>(null) }
+
     val running = importState is ImportState.Running
 
     fun applyYtmToken(token: String?) {
@@ -99,20 +104,24 @@ fun ImportAccountScreen(
     val ytmConnecting by YtmImporter.connecting.collectAsState()
     val ytmError by YtmImporter.error.collectAsState()
 
-    // The browser redirects back into MainActivity, which hands the code to
-    // YtmImporter; the token shows up here and is stored like before.
-    LaunchedEffect(Unit) {
-        YtmImporter.tokenResult.collect { token ->
-            if (token != null) applyYtmToken(YtmImporter.consumeToken())
-        }
-    }
-
     fun connectYoutube() {
         localError = null
         YtmImporter.clearError()
         scope.launch {
-            if (!YtmImporter.authorize(context)) {
-                localError = YtmImporter.error.value ?: "Could not start Google sign-in."
+            try {
+                val deviceInfo = YtmImporter.startDeviceFlow()
+                deviceCodeInfo = deviceInfo
+                showDeviceCodeDialog = true
+
+                // Start polling for token in background
+                val token = YtmImporter.pollForToken(deviceInfo.deviceCode)
+                applyYtmToken(token)
+                showDeviceCodeDialog = false
+                deviceCodeInfo = null
+            } catch (e: Exception) {
+                localError = e.message ?: "Device flow failed"
+                showDeviceCodeDialog = false
+                deviceCodeInfo = null
             }
         }
     }
@@ -124,16 +133,7 @@ fun ImportAccountScreen(
         ytmToken = null
         ytmPlaylists = emptyList()
         selected.keys.filter { it.startsWith("ytm:") }.forEach { selected.remove(it) }
-        scope.launch {
-            val revoked = authRepo.revokeYoutubeAccess(context)
-            localError = if (revoked) {
-                "YouTube disconnected. Tap Connect YouTube Music to choose an account."
-            } else {
-                "YouTube disconnected on this device, but Google could not revoke the " +
-                    "grant. To switch accounts, remove the app's access in your Google " +
-                    "Account permissions, then connect again."
-            }
-        }
+        localError = "YouTube disconnected. Tap Connect YouTube Music to choose an account."
     }
 
     LaunchedEffect(spotifyConnected) {
@@ -453,6 +453,52 @@ fun ImportAccountScreen(
         OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
             Text("Back")
         }
+    }
+
+    // Device flow authorization dialog
+    if (showDeviceCodeDialog && deviceCodeInfo != null) {
+        AlertDialog(
+            onDismissRequest = {
+                showDeviceCodeDialog = false
+                deviceCodeInfo = null
+            },
+            title = { Text("Authorize YouTube Music") },
+            text = {
+                Column {
+                    Text(
+                        "1. Go to ${deviceCodeInfo!!.verificationUrl}",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "2. Enter this code:",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        deviceCodeInfo!!.userCode,
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "Waiting for authorization...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDeviceCodeDialog = false
+                    deviceCodeInfo = null
+                }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 

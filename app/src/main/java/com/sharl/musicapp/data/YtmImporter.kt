@@ -1,36 +1,25 @@
 package com.sharl.musicapp.data
 
-import android.accounts.Account
-import android.accounts.AccountManager
-import android.content.Context
 import android.util.Log
-import com.google.android.gms.auth.GoogleAuthUtil
-import com.google.android.gms.auth.api.identity.AuthorizationRequest
-import com.google.android.gms.auth.api.identity.AuthorizationResult
-import com.google.android.gms.auth.api.identity.Identity
-import com.google.android.gms.common.api.Scope
-import com.sharl.musicapp.BuildConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 
 /**
- * YouTube Data API v3 reader used by the account importer, plus the native
- * authorization flow that requests the YouTube scope via Google Identity APIs.
- *
- * Uses Android Client ID (not Web Client) so no redirect_uri is needed. Google
- * routes back to the app automatically via package name + SHA-1 fingerprint.
+ * YouTube Data API v3 reader used by the account importer, implementing the
+ * TVHTML5 Device Flow (RFC 8628). No redirect URI needed — user authorizes
+ * via google.com/device with a short code.
  */
 object YtmImporter {
 
-    const val YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube"
+    private const val TV_CLIENT_ID = "861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com"
 
     private val _connecting = MutableStateFlow(false)
     val connecting: StateFlow<Boolean> = _connecting
@@ -42,94 +31,71 @@ object YtmImporter {
         _error.value = null
     }
 
+    data class DeviceCodeResponse(
+        val deviceCode: String,
+        val userCode: String,
+        val verificationUrl: String
+    )
+
     /**
-     * Requests YouTube authorization using the native Google Identity API with
-     * Android Client ID. Returns false (with [error] set) when the client isn't
-     * configured.
-     *
-     * This flow does NOT open a browser; it uses the device's Google Play Services
-     * to request consent and obtain an access token directly.
+     * Starts the TVHTML5 Device Flow. Returns codes the user must enter at
+     * google.com/device to authorize the app.
      */
-    suspend fun authorize(context: Context): Boolean {
-        val clientId = BuildConfig.GOOGLE_ANDROID_CLIENT_ID
-        if (clientId.isBlank()) {
-            _error.value = "YouTube import isn't configured: missing GOOGLE_ANDROID_CLIENT_ID."
-            return false
-        }
+    suspend fun startDeviceFlow(): DeviceCodeResponse = withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val url = URL("https://oauth2.googleapis.com/device/code")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+        conn.doOutput = true
 
-        try {
-            _connecting.value = true
-            _error.value = null
+        val body = "client_id=${URLEncoder.encode(TV_CLIENT_ID, "UTF-8")}" +
+                   "&scope=${URLEncoder.encode("https://www.googleapis.com/auth/youtube", "UTF-8")}"
+        conn.outputStream.write(body.toByteArray())
 
-            // Get available Google accounts on the device
-            val accounts = getGoogleAccounts(context)
-            if (accounts.isEmpty()) {
-                fail("No Google accounts found on this device.")
-                return false
-            }
-
-            // Use the first account for now (could be enhanced to show a chooser)
-            val account = accounts.first()
-            Log.d("YTM", "Requesting YouTube scope for account: ${account.name}")
-
-            // Request YouTube authorization via Google Identity API
-            val result = requestAuthorization(context, account)
-            
-            val accessToken = result.accessToken
-            if (accessToken.isNullOrBlank()) {
-                fail("Google returned no access token.")
-                return false
-            }
-            Log.d("YTM", "Successfully obtained YouTube access token")
-            _tokenResult.value = accessToken
-            return true
-        } catch (e: Exception) {
-            Log.e("YTM", "Authorization failed", e)
-            fail("Could not authorize YouTube: ${e.message ?: e.javaClass.simpleName}")
-            return false
-        } finally {
-            _connecting.value = false
+        if (conn.responseCode == 200) {
+            val json = JSONObject(conn.inputStream.bufferedReader().readText())
+            DeviceCodeResponse(
+                deviceCode = json.getString("device_code"),
+                userCode = json.getString("user_code"),
+                verificationUrl = json.getString("verification_url")
+            )
+        } else {
+            throw Exception("Failed to start device flow: ${conn.errorStream.bufferedReader().readText()}")
         }
     }
 
     /**
-     * Retrieves Google accounts from the device AccountManager.
+     * Polls for the access token after the user has authorized the device code.
+     * Must delay 5 seconds before first poll per RFC 8628.
      */
-    private fun getGoogleAccounts(context: Context): List<Account> {
-        val manager = AccountManager.get(context.applicationContext)
-        @Suppress("DEPRECATION")
-        val accounts = manager.getAccountsByType(GoogleAuthUtil.GOOGLE_ACCOUNT_TYPE)
-        return accounts.filter {
-            runCatching { GoogleAuthUtil.getAccountId(context, it.name) }.isSuccess
-        }
-    }
+    suspend fun pollForToken(deviceCode: String): String = withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val url = URL("https://oauth2.googleapis.com/token")
+        while (true) {
+            delay(5000) // MUST delay 5 seconds before first poll
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            conn.doOutput = true
 
-    /**
-     * Requests YouTube authorization for a specific account using Google Identity API.
-     */
-    private suspend fun requestAuthorization(
-        context: Context,
-        account: Account
-    ): AuthorizationResult = suspendCancellableCoroutine { continuation ->
-        val request = AuthorizationRequest.builder()
-            .setRequestedScopes(listOf(Scope(YOUTUBE_SCOPE)))
-            .setAccount(account)
-            .build()
+            val body = "client_id=${URLEncoder.encode(TV_CLIENT_ID, "UTF-8")}" +
+                       "&device_code=${URLEncoder.encode(deviceCode, "UTF-8")}" +
+                       "&grant_type=${URLEncoder.encode("urn:ietf:params:oauth:grant-type:device_code", "UTF-8")}"
+            conn.outputStream.write(body.toByteArray())
 
-        val client = Identity.getAuthorizationClient(context)
-        val task = client.authorize(request)
-        task.addOnSuccessListener { result ->
-            if (!continuation.isCompleted) {
-                continuation.resume(result)
-            }
-        }.addOnFailureListener { exception ->
-            if (!continuation.isCompleted) {
-                continuation.resumeWithException(exception)
+            if (conn.responseCode == 200) {
+                val json = JSONObject(conn.inputStream.bufferedReader().readText())
+                return@withContext json.getString("access_token")
+            } else {
+                val errorText = conn.errorStream.bufferedReader().readText()
+                Log.e("YTM_AUTH", "Poll error: $errorText")
+                val errorJson = JSONObject(errorText)
+                val error = errorJson.optString("error")
+                if (error != "authorization_pending" && error != "slow_down") {
+                    throw Exception("Token polling failed: $error")
+                }
             }
         }
-
-        // Note: Google Play Services Tasks cannot be cancelled externally,
-        // but the coroutine cancellation will still propagate correctly.
+        @Suppress("UNREACHABLE_CODE") ""
     }
 
     /**
@@ -149,13 +115,6 @@ object YtmImporter {
     private fun fail(message: String) {
         _error.value = message
         _connecting.value = false
-    }
-
-    // Stub methods for backward compatibility with MainActivity redirect handling.
-    // These are no-ops in the native flow but keep the API stable.
-    fun matchesPendingState(context: Context, uri: android.net.Uri): Boolean = false
-    fun handleRedirect(context: Context, uri: android.net.Uri) {
-        Log.w("YTM", "handleRedirect called but native flow doesn't use browser redirects")
     }
 
     data class Playlist(val id: String, val title: String, val itemCount: Int)

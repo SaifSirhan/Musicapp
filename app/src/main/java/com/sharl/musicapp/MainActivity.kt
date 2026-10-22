@@ -200,13 +200,8 @@ class MainActivity : ComponentActivity() {
         val data = intent?.data ?: return
         if (data.scheme == "com.sharl.musicapp" && data.host == "callback") {
             pendingImportRedirect = true
-            // Spotify and Google share the callback route; tell them apart by
-            // the OAuth state each flow stored before opening the browser.
-            if (YtmImporter.matchesPendingState(applicationContext, data)) {
-                YtmImporter.handleRedirect(applicationContext, data)
-            } else {
-                SpotifyImporter.handleRedirect(applicationContext, data)
-            }
+            // Only Spotify uses browser redirects now; YouTube uses device flow.
+            SpotifyImporter.handleRedirect(applicationContext, data)
         }
     }
 }
