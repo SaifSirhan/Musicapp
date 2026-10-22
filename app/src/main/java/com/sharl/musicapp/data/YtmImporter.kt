@@ -50,7 +50,7 @@ object YtmImporter {
         conn.doOutput = true
 
         val body = "client_id=${URLEncoder.encode(TV_CLIENT_ID, "UTF-8")}" +
-                   "&scope=${URLEncoder.encode("https://www.googleapis.com/auth/youtube", "UTF-8")}"
+                   "&scope=${URLEncoder.encode("https://www.googleapis.com/auth/youtube.readonly", "UTF-8")}"
         conn.outputStream.write(body.toByteArray())
 
         if (conn.responseCode == 200) {
@@ -217,6 +217,10 @@ object YtmImporter {
         }
         return try {
             val code = conn.responseCode
+            if (code != 200) {
+                val errorBody = conn.errorStream?.bufferedReader()?.readText() ?: "Unknown error"
+                Log.e("YTM_IMPORT", "Playlist fetch failed. Code: $code Body: $errorBody")
+            }
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (code == 401) {
