@@ -751,21 +751,19 @@ fun PlayerScreen(
                 thumbnailUrl = youtubeThumb(videoId)
             )
         }
-        // 1. In-memory (this session).
-        urlCache[videoId]?.let {
-            urlCache.remove(videoId)
-            return it
+        // 1. In-memory (this session) - only for already-resolved local files.
+        urlCache[videoId]?.let { pair ->
+            // Only use cached result if it's a local file, not a network URL
+            if (pair.first.startsWith("file://") || pair.first.startsWith("content://")) {
+                urlCache.remove(videoId)
+                return pair
+            }
         }
-        // 2. Persistent cache (survives restart).
-        PlaybackCache.get(videoId)?.let { c ->
-            return c.url to SongMetadata(
-                title = c.title,
-                artist = c.artist,
-                album = c.album,
-                thumbnailUrl = c.thumbnailUrl
-            )
-        }
-        // 3. Cold extract — yt-dlp only; serialized so only one resolver runs at a time.
+        // Phase 41: Bypass PlaybackCache for audio URLs. It stores stale stream
+        // URLs that cause Source Error 2004. Always download to local file first.
+        // PlaybackCache is kept for metadata only (title, artist, thumbnail).
+        
+        // 2. Cold extract — yt-dlp only; serialized so only one resolver runs at a time.
         loadingVideoId = videoId
         try {
             val result = extractMutex.withLock {
@@ -774,6 +772,8 @@ fun PlayerScreen(
                 Log.e("RESOLVE", "yt-dlp failed for $videoId")
             }
             val (u, m) = result
+            // Store metadata in PlaybackCache for UI display, but the URL is
+            // always a local file from Downloader.cacheForPlayback()
             PlaybackCache.put(videoId, u, m.title, m.artist, m.album, m.thumbnailUrl)
             urlCache[videoId] = result
             return result
@@ -825,10 +825,14 @@ fun PlayerScreen(
                 thumbnailUrl = youtubeThumb(videoId)
             )
         }
-        urlCache[videoId]?.let { return it }
-        PlaybackCache.get(videoId)?.let { c ->
-            return c.url to SongMetadata(c.title, c.artist, c.album, c.thumbnailUrl)
+        // In-session cache - only use if it's a local file
+        urlCache[videoId]?.let { pair ->
+            if (pair.first.startsWith("file://") || pair.first.startsWith("content://")) {
+                return pair
+            }
         }
+        // Phase 41: Skip PlaybackCache for gapless window - it may contain stale
+        // stream URLs. Only return local files from the checks above.
         return null
     }
 
