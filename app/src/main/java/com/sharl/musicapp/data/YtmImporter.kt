@@ -20,6 +20,7 @@ import java.net.URLEncoder
 object YtmImporter {
 
     private const val TV_CLIENT_ID = "861556708454-d6dlm3lh05idd8npek18k6be8ba3oc68.apps.googleusercontent.com"
+    private const val TV_CLIENT_SECRET = "SboVhoG9s0rNafixCSGGKXAT"
 
     private val _connecting = MutableStateFlow(false)
     val connecting: StateFlow<Boolean> = _connecting
@@ -78,6 +79,7 @@ object YtmImporter {
             conn.doOutput = true
 
             val body = "client_id=${URLEncoder.encode(TV_CLIENT_ID, "UTF-8")}" +
+                       "&client_secret=${URLEncoder.encode(TV_CLIENT_SECRET, "UTF-8")}" +
                        "&device_code=${URLEncoder.encode(deviceCode, "UTF-8")}" +
                        "&grant_type=${URLEncoder.encode("urn:ietf:params:oauth:grant-type:device_code", "UTF-8")}"
             conn.outputStream.write(body.toByteArray())
