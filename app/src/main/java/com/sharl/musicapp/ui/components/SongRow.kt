@@ -1,5 +1,6 @@
 package com.sharl.musicapp.ui.components
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,7 +31,8 @@ fun SongRow(
     onLongClick: () -> Unit,
     showDownloaded: Boolean = false,
     isLoading: Boolean = false,
-    onMenuClick: (() -> Unit)? = null
+    onMenuClick: (() -> Unit)? = null,
+    onArtistClick: ((String) -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
@@ -39,7 +41,7 @@ fun SongRow(
                 onClick = onClick,
                 onLongClick = onLongClick
             )
-            .padding(vertical = 12.dp, horizontal = 4.dp),
+            .padding(vertical = 6.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), 48.dp)
@@ -47,40 +49,23 @@ fun SongRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = song.title,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium
             )
             val subtitle = buildString {
                 append(song.artist)
-                song.album?.let { append(" · $it") }
-                append(" · ")
-                append(song.playCount)
-                append(" ")
-                append(if (song.playCount == 1) "play" else "plays")
+                if (showDownloaded) append(" · ✓")
             }
             Text(
                 text = subtitle,
-                style = MaterialTheme.typography.bodySmall
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = if (onArtistClick != null && song.artist.isNotBlank()) {
+                    Modifier.clickable { onArtistClick(song.artist) }
+                } else Modifier
             )
-        }
-        if (showDownloaded) {
-            Text(
-                text = "✓",
-                color = MaterialTheme.colorScheme.primary,
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(end = 4.dp)
-            )
-        }
-        IconButton(onClick = onToggleFavorite) {
-            Text(
-                text = if (song.isFavorite) "★" else "☆",
-                style = MaterialTheme.typography.titleLarge
-            )
-        }
-        if (onMenuClick != null) {
-            IconButton(onClick = onMenuClick) {
-                Text("⋮", style = MaterialTheme.typography.titleLarge)
-            }
         }
         if (isLoading) {
             Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {

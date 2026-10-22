@@ -1582,17 +1582,24 @@ fun PlayerScreen(
             }
             ArtistScreen(
                 artistName = artistScreenName!!,
-                onBack = { artistScreenName = null },
-                onPlaySongs = { songs, index ->
-                    // Artist page is a container: whole list, no Mix (Rule 1).
-                    playFromQueue(
-                        songs.map { QueueItem(it.videoId, it.title, it.artist) },
-                        index
-                    )
+                localSongs = emptyList(), // TODO: Query from database by artist name
+                context = context,
+                scope = scope,
+                onPlay = { items, index -> playFromQueue(items, index) },
+                onDownload = { videoId, title, artist ->
+                    // Trigger download for this track
+                    status = "Downloading: $title"
+                    scope.launch {
+                        try {
+                            Downloader.cacheForPlayback(context, videoId)
+                            status = "Downloaded: $title"
+                        } catch (e: Exception) {
+                            status = "Download failed: ${e.message}"
+                        }
+                    }
                 },
-                onSongMenu = { menuSong = it },
-                downloadIds = downloadIds,
-                loadingVideoId = loadingVideoId
+                downloadedIds = downloadIds.toSet(),
+                onBack = { artistScreenName = null }
             )
         } else if (showPlaylists) {
             androidx.activity.compose.BackHandler {

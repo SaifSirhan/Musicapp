@@ -1,5 +1,9 @@
 package com.sharl.musicapp.ui.screens
 
+import android.content.Context
+import android.util.Log
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -26,149 +30,192 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.sharl.musicapp.QueueItem
+import com.sharl.musicapp.SearchResult
 import com.sharl.musicapp.YtdlpHelper
 import com.sharl.musicapp.data.Song
-import com.sharl.musicapp.ui.components.SongRow
+import com.sharl.musicapp.ui.components.Thumbnail
 import com.sharl.musicapp.ui.util.youtubeThumb
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
-/**
- * Phase 24 (16a MVP): a lightweight artist page. There is no artist metadata
- * API in the app, so the "top songs" are a YouTube search for the artist name.
- * Tapping a song plays the whole result list as a queue — an artist page is a
- * container, so it never opens a Mix (Rule 1).
- */
 @Composable
 fun ArtistScreen(
     artistName: String,
-    onBack: () -> Unit,
-    onPlaySongs: (List<Song>, Int) -> Unit,
-    onSongMenu: (Song) -> Unit = {},
-    downloadIds: Collection<String> = emptySet(),
-    loadingVideoId: String? = null
+    localSongs: List<Song>,
+    context: Context,
+    scope: CoroutineScope,
+    onPlay: (List<QueueItem>, Int) -> Unit,
+    onDownload: (String, String, String) -> Unit, // videoId, title, artist
+    downloadedIds: Set<String>,
+    onBack: () -> Unit
 ) {
-    val context = LocalContext.current
-    var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
-
+    var webResults by remember { mutableStateOf<List<SearchResult>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(false) }
+    
     LaunchedEffect(artistName) {
-        loading = true
-        error = null
-        songs = emptyList()
-        val result = runCatching {
-            YtdlpHelper.searchYouTube(context, artistName, 10)
-        }.getOrElse { e ->
-            error = e.message ?: "Search failed"
-            emptyList()
+        if (artistName.isBlank()) return@LaunchedEffect
+        isLoading = true
+        try {
+            val results = YtdlpHelper.searchYouTube(context, artistName, limit = 20)
+            // Filter out already downloaded songs
+            webResults = results.filter { it.videoId !in downloadedIds }
+            Log.d("ARTIST", "Found ${webResults.size} web results for $artistName")
+        } catch (e: Exception) {
+            Log.e("ARTIST", "Search failed for $artistName", e)
+        } finally {
+            isLoading = false
         }
-        songs = result
-            .distinctBy { it.videoId }
-            .map { r ->
-                Song(
-                    videoId = r.videoId,
-                    title = r.title,
-                    artist = artistName,
-                    thumbnailUrl = youtubeThumb(r.videoId),
-                    lastPlayedAt = 0L,
-                    playCount = 0
-                )
-            }
-        loading = false
     }
-
+    
     Column(modifier = Modifier.fillMaxSize()) {
+        // Header
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 4.dp),
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                IconButton(onClick = onBack) {
-                    Text("←", style = MaterialTheme.typography.headlineMedium)
-                }
+            IconButton(onClick = onBack) {
+                Text("←", style = MaterialTheme.typography.headlineSmall)
             }
-            Spacer(Modifier.width(4.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    artistName,
-                    style = MaterialTheme.typography.headlineSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    if (songs.isNotEmpty()) "Top songs" else "Artist",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Button(
-                onClick = {
-                    if (songs.isNotEmpty()) onPlaySongs(songs, 0)
-                },
-                enabled = songs.isNotEmpty()
-            ) {
-                Text("Play All")
-            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                artistName.ifBlank { "Unknown Artist" },
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.weight(1f)
+            )
         }
-
+        
         HorizontalDivider()
-
-        when {
-            loading -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator()
-                        Spacer(Modifier.height(12.dp))
+        
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            // Local Songs Section
+            if (localSongs.isNotEmpty()) {
+                item {
+                    Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            "Finding songs by $artistName…",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            "In Your Library (${localSongs.size})",
+                            style = MaterialTheme.typography.titleMedium
                         )
+                        Spacer(Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                val items = localSongs.map { 
+                                    QueueItem(it.videoId, it.title, it.artist) 
+                                }
+                                onPlay(items, 0)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Play All")
+                        }
                     }
                 }
+                
+                items(localSongs, key = { it.videoId }) { song ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onPlay(listOf(QueueItem(song.videoId, song.title, song.artist)), 0)
+                            }
+                            .padding(vertical = 6.dp, horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), 48.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                song.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                song.artist,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Text("✓", color = MaterialTheme.colorScheme.primary)
+                    }
+                    HorizontalDivider()
+                }
             }
-            songs.isEmpty() -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .padding(horizontal = 32.dp),
-                    contentAlignment = Alignment.Center
-                ) {
+            
+            // Discovery Section
+            item {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Spacer(Modifier.height(8.dp))
                     Text(
-                        error?.let { "Couldn't load $artistName: $it" }
-                            ?: "No songs found for $artistName.",
-                        textAlign = TextAlign.Center,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        "Discover More",
+                        style = MaterialTheme.typography.titleMedium
                     )
                 }
             }
-            else -> {
-                LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                    items(songs, key = { it.videoId }) { song ->
-                        val index = songs.indexOfFirst { it.videoId == song.videoId }
-                        SongRow(
-                            song = song,
-                            onClick = { onPlaySongs(songs, index) },
-                            onToggleFavorite = {},
-                            onLongClick = { onSongMenu(song) },
-                            showDownloaded = downloadIds.contains(song.videoId),
-                            isLoading = loadingVideoId == song.videoId,
-                            onMenuClick = { onSongMenu(song) }
-                        )
+            
+            if (isLoading) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
                     }
-                    item { Spacer(Modifier.height(96.dp)) }
+                }
+            } else {
+                items(webResults, key = { it.videoId }) { result ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp, horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Thumbnail(youtubeThumb(result.videoId), 48.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                result.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                artistName,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                onDownload(result.videoId, result.title, artistName)
+                            }
+                        ) {
+                            Text("⬇", style = MaterialTheme.typography.titleLarge)
+                        }
+                    }
+                    HorizontalDivider()
                 }
             }
+            
+            if (webResults.isEmpty() && !isLoading && localSongs.isEmpty()) {
+                item {
+                    Text(
+                        "No songs found for this artist.",
+                        modifier = Modifier.padding(32.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+            
+            item { Spacer(Modifier.height(96.dp)) }
         }
     }
 }
