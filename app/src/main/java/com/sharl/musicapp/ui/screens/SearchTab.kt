@@ -59,32 +59,46 @@ fun ColumnScope.SearchTab(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         androidx.compose.material3.OutlinedTextField(
             value = query,
             onValueChange = { onQueryChange(it) },
-            placeholder = { Text("Search songs, artists…") },
+            placeholder = { 
+                Text(
+                    "Search songs, artists…",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyLarge
+                ) 
+            },
             singleLine = true,
             leadingIcon = {
-                Text("🔍",
-                    style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(start = 12.dp))
+                Text(
+                    "🔍",
+                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.padding(start = 8.dp)
+                )
             },
             trailingIcon = {
                 if (query.isNotEmpty()) {
-                    IconButton(onClick = { onQueryChange("") }) {
-                        Text("✕", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+                    IconButton(
+                        onClick = { onQueryChange("") },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Text(
+                            "✕",
+                            style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             },
-            shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
             colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = androidx.compose.material3.MaterialTheme.colorScheme.primary,
-                unfocusedBorderColor = androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant,
+                unfocusedBorderColor = androidx.compose.material3.MaterialTheme.colorScheme.outline,
                 focusedContainerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface,
-                unfocusedContainerColor = androidx.compose.material3.MaterialTheme.colorScheme.surface
+                unfocusedContainerColor = androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
             ),
             modifier = Modifier.fillMaxWidth()
         )
@@ -157,11 +171,33 @@ fun ColumnScope.SearchTab(
     ) {
         if (query.isBlank()) {
             item {
-                Text(
-                    "Search YouTube for any song, or find it in your library.",
-                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(16.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    androidx.compose.foundation.layout.Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "🔍",
+                            style = androidx.compose.material3.MaterialTheme.typography.displaySmall,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        )
+                        Text(
+                            "Search for music",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Find songs on YouTube or in your library",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                    }
+                }
             }
         }
         if (localMatches.isNotEmpty()) {
@@ -195,9 +231,10 @@ fun ColumnScope.SearchTab(
             }
         }
         itemsIndexed(results, key = { _, result -> "yt:${result.videoId}" }) { _, result ->
+            val displayTitle = result.title.ifBlank { "Unknown Track" }
             val song = Song(
                 videoId = result.videoId,
-                title = result.title,
+                title = displayTitle,
                 artist = "YouTube",
                 thumbnailUrl = youtubeThumb(result.videoId),
                 lastPlayedAt = 0L,
@@ -212,37 +249,74 @@ fun ColumnScope.SearchTab(
                         onClick = { onStartMix(song) },
                         onLongClick = { onSongMenu(song) }
                     )
-                    .padding(vertical = 12.dp),
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = result.title,
-                    maxLines = 2,
+                    text = displayTitle,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyLarge.copy(
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+                    ),
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f)
                 )
                 if (result.videoId == loadingVideoId) {
+                    Spacer(Modifier.width(8.dp))
                     androidx.compose.material3.CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(20.dp),
                         strokeWidth = 2.dp,
                         color = androidx.compose.material3.MaterialTheme.colorScheme.primary
                     )
-                    Spacer(Modifier.width(8.dp))
                 } else {
-                    IconButton(onClick = { onSongMenu(song) }) {
-                        Text("⋮", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.width(4.dp))
+                    IconButton(
+                        onClick = { onSongMenu(song) },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Text(
+                            "⋮",
+                            style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
-            HorizontalDivider()
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                color = androidx.compose.material3.MaterialTheme.colorScheme.surfaceVariant
+            )
         }
         if (!isSearching && query.trim().length >= 2 && localMatches.isEmpty() && results.isEmpty()) {
             item {
-                Text(
-                    "No results.",
-                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(16.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    androidx.compose.foundation.layout.Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "😕",
+                            style = androidx.compose.material3.MaterialTheme.typography.displaySmall,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        )
+                        Text(
+                            "No results found",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Try a different search term",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                    }
+                }
             }
         }
     }

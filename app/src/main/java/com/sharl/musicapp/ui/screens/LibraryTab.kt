@@ -216,11 +216,33 @@ fun ColumnScope.LibraryTab(
             }
             2 -> {
                 if (favorites.isEmpty()) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "No favorites yet — tap ☆ on a song to add one.",
-                            modifier = Modifier.padding(top = 8.dp)
-                        )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(32.dp)
+                        ) {
+                            Text(
+                                "☆",
+                                style = androidx.compose.material3.MaterialTheme.typography.displaySmall,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                            )
+                            Text(
+                                "No favorites yet",
+                                style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                "Tap ☆ on a song to add it here",
+                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
+                        }
                     }
                 } else if (libraryLayout == 0) {
                     LazyColumn(

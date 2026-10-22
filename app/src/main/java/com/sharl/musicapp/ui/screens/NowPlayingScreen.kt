@@ -3,6 +3,7 @@ package com.sharl.musicapp.ui.screens
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -18,13 +19,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -43,6 +48,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -52,9 +59,21 @@ import androidx.media3.session.MediaController
 import androidx.media3.ui.PlayerView
 import com.sharl.musicapp.LyricLine
 import com.sharl.musicapp.QueueItem
+import com.sharl.musicapp.R
 import com.sharl.musicapp.ui.components.Thumbnail
 import com.sharl.musicapp.ui.util.formatTime
 import kotlinx.coroutines.delay
+
+/** Sanitizes display titles: replaces raw YouTube IDs with "Unknown Track". */
+private fun sanitizeTitle(title: String): String {
+    val trimmed = title.trim()
+    // Raw YouTube video IDs are exactly 11 chars of [A-Za-z0-9_-]
+    return if (trimmed.length == 11 && trimmed.matches(Regex("^[A-Za-z0-9_-]+$"))) {
+        "Unknown Track"
+    } else {
+        trimmed.ifBlank { "Unknown Track" }
+    }
+}
 
 @Composable
 fun NowPlayingScreen(
@@ -98,45 +117,68 @@ fun NowPlayingScreen(
     onShuffleToggle: () -> Unit,
     onRepeatToggle: () -> Unit
 ) {
+    val displayTitle = sanitizeTitle(title)
+    val displayArtist = artist.trim().ifBlank { "Unknown Artist" }
+    
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .padding(horizontal = 16.dp, vertical = 24.dp)
+            .padding(horizontal = 16.dp, vertical = 16.dp)
     ) {
-        // Top bar: back on the left, "not interested" on the right so the
-        // current track can be hidden without opening its menu.
+        // Top bar: back on the left, "not interested" on the right
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier.size(48.dp),
-                contentAlignment = Alignment.Center
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier.size(48.dp)
             ) {
-                IconButton(onClick = onBack) {
-                    Text(
-                        "←",
-                        style = MaterialTheme.typography.headlineMedium
-                    )
-                }
+                Text(
+                    "←",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
             }
             Spacer(Modifier.weight(1f))
-            IconButton(onClick = onNotInterested) {
-                Text("👎", style = MaterialTheme.typography.titleLarge)
+            IconButton(
+                onClick = onNotInterested,
+                modifier = Modifier.size(48.dp)
+            ) {
+                Text(
+                    "👎",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 
-        TabRow(selectedTabIndex = nowPlayingTab) {
+        TabRow(
+            selectedTabIndex = nowPlayingTab,
+            modifier = Modifier.padding(bottom = 8.dp)
+        ) {
             Tab(
                 selected = nowPlayingTab == 0,
                 onClick = { onNowPlayingTabChange(0) },
-                text = { Text("Art") }
+                text = { 
+                    Text(
+                        "Art",
+                        style = MaterialTheme.typography.labelLarge
+                    ) 
+                }
             )
             Tab(
                 selected = nowPlayingTab == 1,
                 onClick = { onNowPlayingTabChange(1) },
-                text = { Text("Lyrics") }
+                text = { 
+                    Text(
+                        "Lyrics",
+                        style = MaterialTheme.typography.labelLarge
+                    ) 
+                }
             )
             Tab(
                 selected = nowPlayingTab == 2,
@@ -145,7 +187,8 @@ fun NowPlayingScreen(
                     Text(
                         queueTabLabel,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelLarge
                     )
                 }
             )
@@ -173,8 +216,7 @@ fun NowPlayingScreen(
 
         when (nowPlayingTab) {
             0 -> {
-                // Artwork (or video), centered in whatever vertical space is
-                // left so the transport row below can never be pushed off-screen.
+                // Artwork (or video), centered with proper spacing
                 BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -195,41 +237,45 @@ fun NowPlayingScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .aspectRatio(16f / 9f)
+                                .clip(RoundedCornerShape(12.dp))
                         )
                     } else {
-                        val artSize = minOf(maxWidth, maxHeight)
+                        val artSize = minOf(maxWidth * 0.85f, maxHeight * 0.85f)
                         Thumbnail(thumbnailUrl, artSize)
                     }
                 }
-                Spacer(modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                // Title and artist, centered. The speed chip moved next to the
-                // progress times so it no longer squeezes the title.
+                // Title and artist, centered with proper typography
                 Text(
-                    text = title,
-                    style = MaterialTheme.typography.headlineMedium,
-                    maxLines = 2,
+                    text = displayTitle,
+                    style = MaterialTheme.typography.titleLarge.copy(
+                        fontWeight = FontWeight.Bold,
+                        fontSize = MaterialTheme.typography.titleLarge.fontSize
+                    ),
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp)
+                        .padding(horizontal = 16.dp)
                 )
-                Spacer(modifier = Modifier.size(8.dp))
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = artist,
-                    style = MaterialTheme.typography.bodyLarge,
+                    text = displayArtist,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(enabled = artist.isNotBlank(), onClick = onArtistClick)
-                        .padding(vertical = 2.dp)
+                        .clickable(enabled = displayArtist != "Unknown Artist", onClick = onArtistClick)
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
                 )
                 if (isLoading && showExtracting) {
-                    Spacer(modifier = Modifier.size(6.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "Extracting audio…",
                         style = MaterialTheme.typography.bodySmall,
@@ -239,35 +285,33 @@ fun NowPlayingScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.size(8.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                // Video/audio toggle
+                // Video/audio toggle with larger touch target
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
-                        modifier = Modifier.size(56.dp),
-                        contentAlignment = Alignment.Center
+                    IconButton(
+                        onClick = { onToggleVideoMode() },
+                        enabled = !videoModeLoading,
+                        modifier = Modifier.size(56.dp)
                     ) {
-                        IconButton(
-                            onClick = { onToggleVideoMode() },
-                            enabled = !videoModeLoading
-                        ) {
-                            Text(
-                                if (isVideoMode) "🎬" else "🎵",
-                                style = MaterialTheme.typography.titleLarge,
-                                color = if (isVideoMode)
-                                    MaterialTheme.colorScheme.primary
-                                else
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                        Text(
+                            if (isVideoMode) "🎬" else "🎵",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = if (isVideoMode)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                     if (videoModeLoading) {
+                        Spacer(modifier = Modifier.width(8.dp))
                         CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp)
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 2.dp
                         )
                     }
                 }
@@ -277,19 +321,50 @@ fun NowPlayingScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
+                        .padding(horizontal = 16.dp)
                 ) {
                     when {
                         lyricsLoading -> {
-                            CircularProgressIndicator(
-                                modifier = Modifier.align(Alignment.CenterHorizontally)
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(32.dp),
+                                    strokeWidth = 3.dp
+                                )
+                            }
                         }
                         lyrics.isEmpty() -> {
-                            Text(
-                                "No lyrics available.",
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        "🎵",
+                                        style = MaterialTheme.typography.displaySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                    )
+                                    Text(
+                                        "No lyrics available",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        textAlign = TextAlign.Center
+                                    )
+                                    Text(
+                                        "Lyrics will appear here when available",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
                         }
                         else -> {
                             val currentIndex = lyrics.indexOfLast { it.startMs <= currentPosMs }
@@ -312,13 +387,13 @@ fun NowPlayingScreen(
                                         else
                                             MaterialTheme.colorScheme.onSurfaceVariant,
                                         style = if (active)
-                                            MaterialTheme.typography.titleMedium
+                                            MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
                                         else
-                                            MaterialTheme.typography.bodyMedium,
+                                            MaterialTheme.typography.bodyLarge,
                                         textAlign = TextAlign.Center,
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .padding(vertical = 6.dp, horizontal = 16.dp)
+                                            .padding(vertical = 8.dp, horizontal = 8.dp)
                                     )
                                 }
                             }
@@ -334,7 +409,28 @@ fun NowPlayingScreen(
                             .weight(1f),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("Queue is empty.")
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                "🎶",
+                                style = MaterialTheme.typography.displaySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                            Text(
+                                "Queue is empty",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+                            Text(
+                                "Add songs to start listening",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                textAlign = TextAlign.Center
+                            )
+                        }
                     }
                 } else {
                     LazyColumn(
@@ -356,19 +452,22 @@ fun NowPlayingScreen(
                                     Text(
                                         "▶",
                                         color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.padding(end = 8.dp)
+                                        style = MaterialTheme.typography.titleMedium,
+                                        modifier = Modifier.padding(end = 12.dp)
                                     )
                                 } else {
                                     Text(
                                         "${idx + 1}.",
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(end = 8.dp)
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        modifier = Modifier.padding(end = 12.dp)
                                     )
                                 }
                                 Text(
-                                    text = item.title,
-                                    maxLines = 2,
+                                    text = sanitizeTitle(item.title),
+                                    maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodyLarge,
                                     color = if (isCurrent)
                                         MaterialTheme.colorScheme.primary
                                     else
@@ -376,14 +475,20 @@ fun NowPlayingScreen(
                                     modifier = Modifier.weight(1f)
                                 )
                             }
-                            HorizontalDivider()
+                            if (idx < queue.size - 1) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 16.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Progress bar + time labels (visible in all tabs)
+        // Progress bar + time labels with proper spacing
+        Spacer(modifier = Modifier.height(8.dp))
         val displayPos = if (isScrubbing) scrubPositionMs else currentPosMs
         val maxVal = currentDurationMs.coerceAtLeast(1L).toFloat()
         Slider(
@@ -393,12 +498,12 @@ fun NowPlayingScreen(
             valueRange = 0f..maxVal,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp)
+                .padding(horizontal = 8.dp)
         )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp),
+                .padding(horizontal = 16.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
@@ -407,18 +512,23 @@ fun NowPlayingScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.weight(1f))
-            // Playback speed chip; tapping it opens the quick speed slider.
-            Text(
-                text = String.format(java.util.Locale.US, "%.1fx", playbackSpeed),
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier
-                    .clickable {
-                        speedDraft = playbackSpeed
-                        showSpeedDialog = true
-                    }
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            )
+            // Playback speed chip with better touch target
+            Surface(
+                onClick = {
+                    speedDraft = playbackSpeed
+                    showSpeedDialog = true
+                },
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                modifier = Modifier.padding(horizontal = 4.dp)
+            ) {
+                Text(
+                    text = String.format(java.util.Locale.US, "%.1fx", playbackSpeed),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            }
             Spacer(modifier = Modifier.weight(1f))
             Text(
                 formatTime(currentDurationMs),
@@ -427,81 +537,128 @@ fun NowPlayingScreen(
             )
         }
 
-        // Shuffle | Previous | −15s | Play | +15s | Next | Repeat. Every cell
-        // shares the row width through weights, so seven controls fit even on
-        // narrow phones without clipping.
+        // Action row: Download, Favourite, Add to playlist (horizontally scrollable)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(vertical = 8.dp)
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
         ) {
-            TransportSlot(Modifier.weight(1f), onClick = onShuffleToggle) {
+            ActionPillButton(
+                icon = "⬇",
+                label = "Download",
+                onClick = { /* TODO: wire download */ }
+            )
+            ActionPillButton(
+                icon = "♡",
+                label = "Favourite",
+                onClick = { /* TODO: wire favorite */ }
+            )
+            ActionPillButton(
+                icon = "➕",
+                label = "Playlist",
+                onClick = { /* TODO: wire add to playlist */ }
+            )
+            ActionPillButton(
+                icon = "↗",
+                label = "Share",
+                onClick = { /* TODO: wire share */ }
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Transport controls: Shuffle | Previous | −15s | Play | +15s | Next | Repeat
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            TransportButton(
+                onClick = onShuffleToggle,
+                modifier = Modifier.size(48.dp)
+            ) {
                 Text(
                     "🔀",
-                    style = MaterialTheme.typography.titleLarge,
+                    style = MaterialTheme.typography.titleMedium,
                     color = if (isShuffled)
                         MaterialTheme.colorScheme.primary
                     else
                         MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            TransportSlot(Modifier.weight(1f), onClick = onSkipPrevious) {
+            TransportButton(
+                onClick = onSkipPrevious,
+                modifier = Modifier.size(48.dp)
+            ) {
                 Text(
                     "⏮",
-                    style = MaterialTheme.typography.titleLarge,
+                    style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface
                 )
             }
-            TransportSlot(Modifier.weight(1f), onClick = onSkipBack) {
+            TransportButton(
+                onClick = onSkipBack,
+                modifier = Modifier.size(48.dp)
+            ) {
                 Text(
                     "−${skipSeconds}s",
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface
                 )
             }
+            
+            // Play/Pause button - larger and more prominent
             Box(
-                modifier = Modifier.weight(1.25f),
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary)
+                    .clickable(enabled = !isLoading) { onPlayPause() },
                 contentAlignment = Alignment.Center
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(52.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
-                        .clickable(enabled = !isLoading) { onPlayPause() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (isLoading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(26.dp),
-                            strokeWidth = 3.dp,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                    } else {
-                        TransportIcon(
-                            kind = if (isPlaying) TransportKind.Pause else TransportKind.Play,
-                            size = 26.dp,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
-                    }
+                if (isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(28.dp),
+                        strokeWidth = 3.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                } else {
+                    TransportIcon(
+                        kind = if (isPlaying) TransportKind.Pause else TransportKind.Play,
+                        size = 32.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
                 }
             }
-            TransportSlot(Modifier.weight(1f), onClick = onSkipForward) {
+            
+            TransportButton(
+                onClick = onSkipForward,
+                modifier = Modifier.size(48.dp)
+            ) {
                 Text(
                     "+${skipSeconds}s",
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface
                 )
             }
-            TransportSlot(Modifier.weight(1f), onClick = onSkipNext) {
+            TransportButton(
+                onClick = onSkipNext,
+                modifier = Modifier.size(48.dp)
+            ) {
                 Text(
                     "⏭",
-                    style = MaterialTheme.typography.titleLarge,
+                    style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface
                 )
             }
-            TransportSlot(Modifier.weight(1f), onClick = onRepeatToggle) {
+            TransportButton(
+                onClick = onRepeatToggle,
+                modifier = Modifier.size(48.dp)
+            ) {
                 val glyph = when (repeatMode) {
                     1 -> "🔁"
                     2 -> "🔂"
@@ -509,7 +666,7 @@ fun NowPlayingScreen(
                 }
                 Text(
                     glyph,
-                    style = MaterialTheme.typography.titleLarge,
+                    style = MaterialTheme.typography.titleMedium,
                     color = if (repeatMode == 0)
                         MaterialTheme.colorScheme.onSurfaceVariant
                     else
@@ -518,7 +675,7 @@ fun NowPlayingScreen(
             }
         }
 
-        Spacer(modifier = Modifier.size(16.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         if (showSpeedDialog) {
             AlertDialog(
@@ -558,16 +715,48 @@ fun NowPlayingScreen(
     }
 }
 
-/** One fixed-height, weighted cell in the seven-button transport row. */
+/** Pill-shaped action button for the Now Playing action row. */
 @Composable
-private fun TransportSlot(
-    modifier: Modifier,
+private fun ActionPillButton(
+    icon: String,
+    label: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        modifier = Modifier.height(40.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                icon,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/** Transport control button with consistent sizing and touch target. */
+@Composable
+private fun TransportButton(
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
     Box(
         modifier = modifier
-            .height(48.dp)
+            .clip(CircleShape)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {

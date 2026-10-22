@@ -90,8 +90,11 @@ fun ColumnScope.HomeTab(
                 if (quickPicks30.isNotEmpty()) {
                     Text(
                         "Quick picks",
-                        style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp)
+                        style = androidx.compose.material3.MaterialTheme.typography.titleLarge.copy(
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                        ),
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp)
                     )
                     val quickPagerState = androidx.compose.foundation.pager.rememberPagerState(
                         pageCount = { quickPickPages }
@@ -107,40 +110,58 @@ fun ColumnScope.HomeTab(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clickable { onSongMix(song) }
-                                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                                        .padding(horizontal = 16.dp, vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Thumbnail(song.thumbnailUrl ?: youtubeThumb(song.videoId), 56.dp)
                                     Spacer(Modifier.width(12.dp))
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(song.title, maxLines = 2,
+                                        Text(
+                                            song.title.ifBlank { "Unknown Track" },
+                                            maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
-                                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface)
+                                            style = androidx.compose.material3.MaterialTheme.typography.bodyLarge.copy(
+                                                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+                                            ),
+                                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+                                        )
                                         Text(
                                             "${song.artist} · ${song.playCount} " +
                                             if (song.playCount == 1) "play" else "plays",
                                             style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
                                             color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                     }
                                     if (downloadIds.contains(song.videoId)) {
                                         Text(
                                             "✓",
                                             color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
                                             style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-                                            modifier = Modifier.padding(end = 2.dp)
+                                            modifier = Modifier.padding(horizontal = 4.dp)
                                         )
                                     }
-                                    Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                                    androidx.compose.foundation.layout.Box(
+                                        modifier = Modifier.size(48.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
                                         if (song.videoId == loadingVideoId) {
                                             androidx.compose.material3.CircularProgressIndicator(
-                                                modifier = Modifier.size(16.dp),
+                                                modifier = Modifier.size(20.dp),
                                                 strokeWidth = 2.dp,
                                                 color = androidx.compose.material3.MaterialTheme.colorScheme.primary
                                             )
                                         } else {
-                                            IconButton(onClick = { onSongMenu(song) }) {
-                                                Text("⋮", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                                            androidx.compose.material3.IconButton(
+                                                onClick = { onSongMenu(song) },
+                                                modifier = Modifier.size(48.dp)
+                                            ) {
+                                                Text(
+                                                    "⋮",
+                                                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                                                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
                                             }
                                         }
                                     }
@@ -174,18 +195,20 @@ fun ColumnScope.HomeTab(
                 androidx.compose.foundation.layout.Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    androidx.compose.material3.OutlinedButton(
+                    androidx.compose.material3.Button(
                         onClick = onDiscoverUnderground,
                         enabled = !undergroundLoading,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
                     ) {
                         if (undergroundLoading) {
                             androidx.compose.material3.CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary
                             )
                             Spacer(Modifier.width(8.dp))
                             Text("Digging…")
@@ -210,23 +233,31 @@ fun ColumnScope.HomeTab(
                 if (newDrops.isNotEmpty()) {
                     Row(
                         modifier = Modifier.fillMaxWidth()
-                            .padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp),
+                            .padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
                             "New drops",
-                            style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
+                            style = androidx.compose.material3.MaterialTheme.typography.titleLarge.copy(
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                            ),
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.weight(1f)
                         )
                         if (newDropsLoading) {
                             androidx.compose.material3.CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
+                                modifier = Modifier.size(18.dp),
                                 strokeWidth = 2.dp
                             )
                         }
                         androidx.compose.material3.TextButton(
                             onClick = { onSeeAllDrops() }
-                        ) { Text("See all") }
+                        ) { 
+                            Text(
+                                "See all",
+                                style = androidx.compose.material3.MaterialTheme.typography.labelLarge
+                            ) 
+                        }
                     }
                     HorizontalCarousel(
                         items = newDrops.take(20),
@@ -242,8 +273,11 @@ fun ColumnScope.HomeTab(
             item {
                 Text(
                     "Speed Dial",
-                    style = androidx.compose.material3.MaterialTheme.typography.headlineSmall,
-                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 4.dp)
+                    style = androidx.compose.material3.MaterialTheme.typography.titleLarge.copy(
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                    ),
+                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 8.dp)
                 )
                 val dialPagerState = androidx.compose.foundation.pager.rememberPagerState(
                     pageCount = { 5 }
