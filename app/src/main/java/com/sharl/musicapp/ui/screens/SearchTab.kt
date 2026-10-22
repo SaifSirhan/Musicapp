@@ -4,10 +4,12 @@ import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -54,6 +56,7 @@ fun ColumnScope.SearchTab(
     onStartMix: (Song) -> Unit,
     onToggleFavorite: (Song) -> Unit,
     onSongMenu: (Song) -> Unit,
+    onDownload: (String, String, String) -> Unit, // videoId, title, artist
     downloadIds: List<String>,
     loadingVideoId: String?,
 ) {
@@ -119,6 +122,18 @@ fun ColumnScope.SearchTab(
         }
         if (trimmed.length < 2) return@LaunchedEffect
         
+        // Phase 43: Check connectivity before searching
+        val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+        val isConnected = cm?.activeNetworkInfo?.isConnected == true
+        
+        if (!isConnected) {
+            onResultsChange(emptyList())
+            onSearchingChange(false)
+            currentSearchJob.value?.cancel()
+            currentSearchJob.value = null
+            return@LaunchedEffect
+        }
+        
         kotlinx.coroutines.delay(400)
         
         // Cancel any previous search job
@@ -173,6 +188,35 @@ fun ColumnScope.SearchTab(
             Text(
                 "Searching…",
                 style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+
+    // Phase 43: Show offline message when no connectivity and user tries to search
+    val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+    val isOffline = cm?.activeNetworkInfo?.isConnected != true && query.trim().isNotBlank()
+    
+    if (isOffline) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                "📵",
+                style = androidx.compose.material3.MaterialTheme.typography.displaySmall
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "You are offline.",
+                style = androidx.compose.material3.MaterialTheme.typography.titleMedium
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Search disabled. Play from your library.",
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                 color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
@@ -261,7 +305,10 @@ fun ColumnScope.SearchTab(
                 modifier = Modifier
                     .fillMaxWidth()
                     .combinedClickable(
-                        onClick = { onStartMix(song) },
+                        onClick = { 
+                            // Phase 43: Tap triggers download, not play
+                            onDownload(result.videoId, displayTitle, "YouTube")
+                        },
                         onLongClick = { onSongMenu(song) }
                     )
                     .padding(horizontal = 16.dp, vertical = 12.dp),
@@ -277,7 +324,17 @@ fun ColumnScope.SearchTab(
                     color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f)
                 )
-                if (result.videoId == loadingVideoId) {
+                // Show download status
+                if (downloadIds.contains(result.videoId)) {
+                    // Already downloaded
+                    Text(
+                        "✓",
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                        style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(end = 4.dp)
+                    )
+                } else if (result.videoId == loadingVideoId) {
+                    // Downloading
                     Spacer(Modifier.width(8.dp))
                     androidx.compose.material3.CircularProgressIndicator(
                         modifier = Modifier.size(20.dp),
@@ -285,15 +342,16 @@ fun ColumnScope.SearchTab(
                         color = androidx.compose.material3.MaterialTheme.colorScheme.primary
                     )
                 } else {
+                    // Not downloaded - show download icon
                     Spacer(Modifier.width(4.dp))
                     IconButton(
-                        onClick = { onSongMenu(song) },
+                        onClick = { onDownload(result.videoId, displayTitle, "YouTube") },
                         modifier = Modifier.size(48.dp)
                     ) {
                         Text(
-                            "⋮",
+                            "⬇",
                             style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
-                            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                            color = androidx.compose.material3.MaterialTheme.colorScheme.primary
                         )
                     }
                 }

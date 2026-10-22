@@ -2085,6 +2085,21 @@ fun PlayerScreen(
                     onStartMix = { startMix(it) },
                     onToggleFavorite = { song -> scope.launch { repo.toggleFavorite(song) } },
                     onSongMenu = { menuSong = it },
+                    onDownload = { videoId, title, artist ->
+                        // Phase 43: Trigger download for search result
+                        status = "Downloading: $title"
+                        loadingVideoId = videoId
+                        scope.launch {
+                            try {
+                                Downloader.cacheForPlayback(context, videoId)
+                                status = "Downloaded: $title"
+                            } catch (e: Exception) {
+                                status = "Download failed: ${e.message}"
+                            } finally {
+                                if (loadingVideoId == videoId) loadingVideoId = null
+                            }
+                        }
+                    },
                     downloadIds = downloadIds,
                     loadingVideoId = loadingVideoId,
                 )

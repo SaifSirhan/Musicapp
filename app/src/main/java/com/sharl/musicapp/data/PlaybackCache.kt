@@ -5,23 +5,21 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 data class CachedStream(
-    val url: String,
+    val url: String, // Now always a local file URI (file://)
     val title: String,
     val artist: String,
     val album: String?,
-    val thumbnailUrl: String?,
-    val expiresAt: Long
+    val thumbnailUrl: String?
 )
 
 /**
- * Stream-URL cache for fast replay. In-memory LRU (max 30), backed by
- * SharedPreferences so the hot set survives an app restart. YouTube stream
- * URLs are typically valid ~6h; a 1h TTL stays comfortably inside that.
+ * Phase 42/43: Metadata cache for local files. In-memory LRU (max 30), backed by
+ * SharedPreferences so the hot set survives an app restart. URLs are now always
+ * local file paths from Downloader.cacheForPlayback(), so no TTL needed.
  */
 object PlaybackCache {
     private const val PREFS = "playback_cache"
     private const val KEY = "entries"
-    private const val TTL_MS = 60L * 60 * 1000  // 1 hour
     private const val MAX_ENTRIES = 30
 
     private val mem = LinkedHashMap<String, CachedStream>()
@@ -32,7 +30,6 @@ object PlaybackCache {
         val ctx = context.applicationContext
         appContext = ctx
         val raw = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
-        val now = System.currentTimeMillis()
         mem.clear()
         if (raw != null) {
             try {
@@ -41,15 +38,13 @@ object PlaybackCache {
                     val o = arr.optJSONObject(i) ?: continue
                     val id = o.optString("id")
                     val url = o.optString("url")
-                    val exp = o.optLong("expiresAt", 0L)
-                    if (id.isBlank() || url.isBlank() || exp <= now) continue
+                    if (id.isBlank() || url.isBlank()) continue
                     mem[id] = CachedStream(
                         url = url,
                         title = o.optString("title"),
                         artist = o.optString("artist"),
                         album = o.optString("album").ifBlank { null },
-                        thumbnailUrl = o.optString("thumbnail").ifBlank { null },
-                        expiresAt = exp
+                        thumbnailUrl = o.optString("thumbnail").ifBlank { null }
                     )
                 }
             } catch (_: Exception) {
@@ -62,11 +57,6 @@ object PlaybackCache {
     @Synchronized
     fun get(videoId: String): CachedStream? {
         val e = mem[videoId] ?: return null
-        if (e.expiresAt <= System.currentTimeMillis()) {
-            mem.remove(videoId)
-            save()
-            return null
-        }
         // LRU touch
         mem.remove(videoId)
         mem[videoId] = e
@@ -90,8 +80,7 @@ object PlaybackCache {
             title = title,
             artist = artist,
             album = album,
-            thumbnailUrl = thumbnailUrl,
-            expiresAt = System.currentTimeMillis() + TTL_MS
+            thumbnailUrl = thumbnailUrl
         )
         while (mem.size > MAX_ENTRIES) {
             val oldest = mem.keys.firstOrNull() ?: break
@@ -124,7 +113,6 @@ object PlaybackCache {
                 put("artist", e.artist)
                 put("album", e.album ?: "")
                 put("thumbnail", e.thumbnailUrl ?: "")
-                put("expiresAt", e.expiresAt)
             })
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
