@@ -55,23 +55,26 @@ object YtmImporter {
     /**
      * Opens the Google consent page in the default browser. Returns false (with
      * [error] set) when the client isn't configured for a code exchange.
+     * 
+     * Uses Android Client ID which does not require a redirect_uri parameter.
+     * Google automatically routes back to the app via package name + SHA-1.
      */
     fun authorize(context: Context): Boolean {
-        val clientId = BuildConfig.GOOGLE_WEB_CLIENT_ID
+        val clientId = BuildConfig.GOOGLE_ANDROID_CLIENT_ID
         if (clientId.isBlank()) {
-            _error.value = "YouTube import isn't configured: missing GOOGLE_WEB_CLIENT_ID."
+            _error.value = "YouTube import isn't configured: missing GOOGLE_ANDROID_CLIENT_ID."
             return false
         }
-        val redirect = redirectUri()
         val verifier = base64Url(ByteArray(32).also { SecureRandom().nextBytes(it) })
         val state = UUID.randomUUID().toString()
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(KEY_VERIFIER, verifier)
             .putString(KEY_STATE, state)
             .apply()
+        // Android Client ID does not require redirect_uri; Google uses the
+        // registered package name + SHA-1 to route back to the app.
         val url = AUTH_URL +
             "?client_id=" + enc(clientId) +
-            "&redirect_uri=" + enc(redirect) +
             "&response_type=code" +
             "&scope=" + enc(YOUTUBE_SCOPE) +
             // Forced every time: a previously-consented account would otherwise be
@@ -136,8 +139,9 @@ object YtmImporter {
         val body = buildString {
             append("grant_type=authorization_code")
             append("&code=").append(enc(code))
-            append("&client_id=").append(enc(BuildConfig.GOOGLE_WEB_CLIENT_ID))
-            append("&redirect_uri=").append(enc(redirectUri()))
+            append("&client_id=").append(enc(BuildConfig.GOOGLE_ANDROID_CLIENT_ID))
+            // Android Client ID does not require redirect_uri; Google uses the
+            // registered package name + SHA-1 for routing.
             verifier?.let { append("&code_verifier=").append(enc(it)) }
             if (BuildConfig.GOOGLE_OAUTH_CLIENT_SECRET.isNotBlank()) {
                 append("&client_secret=").append(enc(BuildConfig.GOOGLE_OAUTH_CLIENT_SECRET))
@@ -184,7 +188,6 @@ object YtmImporter {
         val desc = json?.optString("error_description").orEmpty().trim()
         val hint = when {
             error == "invalid_client" -> " — Check GOOGLE_OAUTH_CLIENT_SECRET in secrets.properties."
-            error == "redirect_uri_mismatch" -> " — Register '${redirectUri()}' on the OAuth client."
             else -> ""
         }
         val tail = if (desc.isBlank()) hint else " — ${desc.take(200)}$hint"

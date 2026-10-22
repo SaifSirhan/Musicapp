@@ -62,6 +62,10 @@ android {
         buildConfigField("String", "SUPABASE_URL", "\"${secret("SUPABASE_URL")}\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"${secret("SUPABASE_ANON_KEY")}\"")
         buildConfigField("String", "GOOGLE_WEB_CLIENT_ID", "\"${secret("GOOGLE_WEB_CLIENT_ID")}\"")
+        // Android Client ID for YouTube Data API authorization. Unlike the Web
+        // client, this type does not require a redirect_uri; Google routes back
+        // via the package name + SHA-1 registered in the Cloud Console.
+        buildConfigField("String", "GOOGLE_ANDROID_CLIENT_ID", "\"${secret("GOOGLE_ANDROID_CLIENT_ID")}\"")
         // Browser OAuth for YouTube import. The redirect must be registered as an
         // authorized redirect URI on a Web-type OAuth client; the secret is only
         // needed for that client to accept the code exchange.
