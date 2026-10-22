@@ -41,6 +41,10 @@ interface SongDao {
     @Query("SELECT * FROM songs WHERE isHidden = 0 AND artist = :artist ORDER BY lastPlayedAt DESC LIMIT :limit")
     fun songsByArtist(artist: String, limit: Int): Flow<List<Song>>
 
+    // Phase 44d: Get all songs by artist (no limit) for ArtistDetailScreen
+    @Query("SELECT * FROM songs WHERE isHidden = 0 AND artist = :artistName ORDER BY lastPlayedAt DESC")
+    fun getSongsByArtist(artistName: String): Flow<List<Song>>
+
     @Query("SELECT * FROM songs WHERE isHidden = 0 ORDER BY title COLLATE NOCASE")
     fun allSongs(): Flow<List<Song>>
 

@@ -2172,6 +2172,7 @@ fun PlayerScreen(
                     onPlayLocal = { items, index -> playLocal(items, index) },
                     onRequestMediaPermission = { mediaPermissionLauncher.launch(mediaPermissions()) },
                     onRescanLocal = { scope.launch { localMediaRepo.refresh() } },
+                    songDao = repo.getDao(), // Phase 44d: For artist queries in LibraryTab
                 )
             }
         }

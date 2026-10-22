@@ -17,11 +17,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -37,6 +41,7 @@ import com.sharl.musicapp.data.PlaylistRepository
 import com.sharl.musicapp.data.Profile
 import com.sharl.musicapp.data.SharedPlaylistSong
 import com.sharl.musicapp.data.Song
+import com.sharl.musicapp.data.SongDao
 import com.sharl.musicapp.ui.components.SongRow
 import com.sharl.musicapp.ui.components.Thumbnail
 import com.sharl.musicapp.ui.util.youtubeThumb
@@ -94,261 +99,144 @@ fun ColumnScope.LibraryTab(
     onPlayLocal: (List<LocalMedia>, Int) -> Unit,
     onRequestMediaPermission: () -> Unit,
     onRescanLocal: () -> Unit,
+    songDao: SongDao, // Phase 44d: For artist queries
 ) {
+    // Phase 44d: Nested tabs for Songs/Artists/Playlists
+    var librarySubTab by remember { mutableStateOf(0) } // 0=Songs, 1=Artists, 2=Playlists
+    var selectedArtist by remember { mutableStateOf<String?>(null) }
+    
+    // Phase 44d: Get unique artists from downloads
+    val artists = remember(downloads) {
+        downloads.groupBy { it.artist }
+            .filterKeys { it.isNotBlank() }
+            .map { (artistName, songs) -> 
+                artistName to (songs.first().thumbnailUrl ?: youtubeThumb(songs.first().videoId))
+            }
+            .sortedBy { it.first.lowercase() }
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .weight(1f)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+        // Phase 44d: Top-level TabRow for Songs/Artists/Playlists
+        androidx.compose.material3.TabRow(
+            selectedTabIndex = librarySubTab,
+            modifier = Modifier.fillMaxWidth()
         ) {
-            // Only the chip strip scrolls; the trailing icons stay anchored
-            // to the end so they're always reachable on narrow screens.
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .horizontalScroll(rememberScrollState()),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                FilterChip(
-                    selected = libraryTab == 0,
-                    onClick = { onLibraryTabChange(0) },
-                    label = { Text("Downloads", maxLines = 1, softWrap = false) }
-                )
-                Spacer(Modifier.width(8.dp))
-                FilterChip(
-                    selected = libraryTab == 1,
-                    onClick = { onLibraryTabChange(1) },
-                    label = { Text("Playlists", maxLines = 1, softWrap = false) }
-                )
-                Spacer(Modifier.width(8.dp))
-                FilterChip(
-                    selected = libraryTab == 2,
-                    onClick = { onLibraryTabChange(2) },
-                    label = { Text("Favorites", maxLines = 1, softWrap = false) }
-                )
-                Spacer(Modifier.width(8.dp))
-                FilterChip(
-                    selected = libraryTab == 3,
-                    onClick = { onLibraryTabChange(3) },
-                    label = { Text("Friends", maxLines = 1, softWrap = false) }
-                )
-                Spacer(Modifier.width(8.dp))
-                FilterChip(
-                    selected = libraryTab == 4,
-                    onClick = { onLibraryTabChange(4) },
-                    label = { Text("Local", maxLines = 1, softWrap = false) }
-                )
-            }
-            Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                IconButton(onClick = { onImportClick() }) {
-                    Text(
-                        "⤓",
-                        style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
-                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
-                    )
-                }
-            }
-            Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                IconButton(onClick = { onLibraryLayoutChange(if (libraryLayout == 0) 1 else 0) }) {
-                    Text(
-                        if (libraryLayout == 0) "▦" else "☰",
-                        style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
-                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
-                    )
-                }
-            }
+            androidx.compose.material3.Tab(
+                selected = librarySubTab == 0,
+                onClick = { librarySubTab = 0 },
+                text = { Text("Songs") }
+            )
+            androidx.compose.material3.Tab(
+                selected = librarySubTab == 1,
+                onClick = { librarySubTab = 1 },
+                text = { Text("Artists") }
+            )
+            androidx.compose.material3.Tab(
+                selected = librarySubTab == 2,
+                onClick = { librarySubTab = 2 },
+                text = { Text("Playlists") }
+            )
         }
 
-        when (libraryTab) {
-            0 -> Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            ) {
-                DownloadsScreen(
-                    downloads = downloads,
-                    downloadStates = downloadStates,
-                    onPlay = { index ->
-                        onPlayFromQueue(
-                            downloads.map { QueueItem(it.videoId, it.title, it.artist) },
-                            index
-                        )
-                    },
-                    onRemove = { d ->
-                        scope.launch { Downloader.remove(context, d) }
-                    },
-                    onRemoveAll = { onRemoveAllDownloads() },
-                    onFindMusic = { onFindMusic() },
-                    onMenuAction = onDownloadMenuAction
-                )
+        when (librarySubTab) {
+            0 -> {
+                // Songs Tab - show DownloadsScreen with search
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    DownloadsScreen(
+                        downloads = downloads,
+                        downloadStates = downloadStates,
+                        onPlay = { index ->
+                            onPlayFromQueue(
+                                downloads.map { QueueItem(it.videoId, it.title, it.artist) },
+                                index
+                            )
+                        },
+                        onRemove = { d ->
+                            scope.launch { Downloader.remove(context, d) }
+                        },
+                        onRemoveAll = { onRemoveAllDownloads() },
+                        onFindMusic = { onFindMusic() },
+                        onMenuAction = onDownloadMenuAction
+                    )
+                }
             }
-            1 -> Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            ) {
-                PlaylistsScreen(
-                    playlists = playlists,
-                    openPlaylistId = openPlaylistId,
-                    playlistRepo = playlistRepo,
-                    onBack = { onOpenPlaylistChange(null) },
-                    onOpenPlaylist = { id -> onOpenPlaylistChange(id) },
-                    onPlayFromPlaylist = { songs, index ->
-                        onPlayFromQueue(songs.map { QueueItem(it.videoId, it.title, it.artist) }, index)
-                    },
-                    onCreatePlaylist = { onCreatePlaylist() },
-                    playlistName = playlists.firstOrNull { it.id == openPlaylistId }?.name ?: "",
-                    playlistCreatedAt = playlists.firstOrNull { it.id == openPlaylistId }?.createdAt ?: 0L,
-                    onRequestRename = {
-                        onRequestRename(playlists.firstOrNull { it.id == openPlaylistId }?.name ?: "")
-                    },
-                    onRequestDelete = { onRequestDelete() },
-                    onSongMenu = { ps -> onPlaylistSongMenu(ps) },
-                    onPlaylistMenu = { pl -> onPlaylistMenu(pl) },
-                    loadingVideoId = loadingVideoId,
-                    onPreExtract = { id -> scope.launch { onPreExtract(id) } }
-                )
-            }
-            2 -> {
-                if (favorites.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.padding(32.dp)
-                        ) {
-                            Text(
-                                "☆",
-                                style = androidx.compose.material3.MaterialTheme.typography.displaySmall,
-                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+            1 -> {
+                // Artists Tab - grid of unique artists
+                if (selectedArtist != null) {
+                    // Show ArtistDetailScreen when artist is selected
+                    ArtistDetailScreen(
+                        artistName = selectedArtist!!,
+                        songDao = songDao,
+                        onBack = { selectedArtist = null },
+                        onPlayAll = { songs ->
+                            onPlayFromQueue(
+                                songs.map { QueueItem(it.videoId, it.title, it.artist) },
+                                0
                             )
-                            Text(
-                                "No favorites yet",
-                                style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
-                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        onSongClick = { song ->
+                            onPlayFromQueue(
+                                listOf(QueueItem(song.videoId, song.title, song.artist)),
+                                0
                             )
-                            Text(
-                                "Tap ☆ on a song to add it here",
-                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                                color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                            )
-                        }
-                    }
-                } else if (libraryLayout == 0) {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
-                            .padding(top = 8.dp)
-                    ) {
-                        val items = favorites.map { QueueItem(it.videoId, it.title, it.artist) }
-                        itemsIndexed(favorites, key = { _, song -> song.videoId }) { idx, song ->
-                            SongRow(
-                                song = song,
-                                onClick = { onPlayFromQueue(items, idx) },
-                                onToggleFavorite = { onToggleFavorite(song) },
-                                onLongClick = { onSongMenu(song) },
-                                showDownloaded = downloadIds.contains(song.videoId),
-                                isLoading = song.videoId == loadingVideoId,
-                                onMenuClick = { onSongMenu(song) }
-                            )
-                        }
-                    }
+                        },
+                        onSongMenu = onSongMenu
+                    )
                 } else {
+                    // Show artists grid
                     androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
                         columns = androidx.compose.foundation.lazy.grid.GridCells.Fixed(2),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .weight(1f),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp)
+                            .weight(1f)
+                            .padding(8.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)
                     ) {
-                        items(favorites, key = { it.videoId }) { song ->
-                            Column(
+                        items(artists, key = { it.first }) { (artistName, thumbnailUrl) ->
+                            androidx.compose.foundation.layout.Column(
                                 modifier = Modifier
-                                    .padding(8.dp)
-                                    .clickable {
-                                        onPlayFromQueue(
-                                            favorites.map { QueueItem(it.videoId, it.title, it.artist) },
-                                            favorites.indexOf(song)
-                                        )
-                                    }
+                                    .padding(4.dp)
+                                    .clickable { selectedArtist = artistName }
+                                    .padding(8.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                Thumbnail(
-                                    song.thumbnailUrl ?: youtubeThumb(song.videoId),
-                                    160.dp
-                                )
-                                Spacer(Modifier.height(8.dp))
+                                Thumbnail(thumbnailUrl, 80.dp)
+                                Spacer(Modifier.height(4.dp))
                                 Text(
-                                    song.title,
+                                    artistName,
+                                    style = MaterialTheme.typography.bodyMedium,
                                     maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-                                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                                Text(
-                                    song.artist,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                                    color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                            }
+                        }
+                        
+                        if (artists.isEmpty()) {
+                            item {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(200.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        "No artists found. Download some songs first.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                     }
                 }
-            }
-            3 -> Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            ) {
-                FriendsScreen(
-                    configured = friendsConfigured,
-                    signedIn = signedIn,
-                    friends = friends,
-                    loading = friendsLoading,
-                    error = friendsError,
-                    selectedFriend = selectedFriend,
-                    friendSongs = selectedFriendSongs,
-                    friendSongsLoading = selectedFriendSongsLoading,
-                    nowPlaying = friendsNowPlaying,
-                    onBack = { onFriendBack() },
-                    onBackToList = { onFriendBack() },
-                    onOpenFriend = { f -> onOpenFriend(f) },
-                    onPlayFriendSongs = { idx ->
-                        onPlayFromQueue(
-                            selectedFriendSongs.map {
-                                QueueItem(it.videoId, it.title ?: "", it.artist ?: "")
-                            },
-                            idx
-                        )
-                    },
-                    onSignIn = { onSignIn() }
-                )
-            }
-            4 -> Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            ) {
-                LocalMediaScreen(
-                    localMedia = localMedia,
-                    hasPermission = hasMediaPermission,
-                    onPlay = { items, index -> onPlayLocal(items, index) },
-                    onRequestPermission = { onRequestMediaPermission() },
-                    onRescan = { onRescanLocal() }
-                )
+                }
             }
         }
     }
-}

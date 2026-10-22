@@ -4,6 +4,9 @@ import android.content.Context
 
 class SongRepository(context: Context) {
     private val dao = AppDatabase.get(context).songDao()
+    
+    // Phase 44d: Expose DAO for artist queries in LibraryTab
+    fun getDao() = dao
 
     suspend fun recordPlay(
         videoId: String,
