@@ -3,7 +3,6 @@ package com.sharl.musicapp
 import android.content.Context
 import android.util.Log
 import com.sharl.musicapp.data.DiagnosticsManager
-import com.sharl.musicapp.data.InnerTubeHelper
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDL.UpdateChannel
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -99,9 +98,7 @@ object YtdlpHelper {
     private const val MAX_DURATION_MS = 12L * 60 * 1000
 
     /**
-     * InnerTube search first (one HTTP round-trip, ~200-600ms), yt-dlp only when
-     * it returns nothing (offline, or the search layout changed shape). The
-     * fallback is ~3-5s because it spawns a process, so it is always logged.
+     * Phase 42: Local-first - yt-dlp only, no InnerTube. Search takes ~3-5s.
      */
     suspend fun searchYouTube(
         context: Context,
@@ -109,33 +106,29 @@ object YtdlpHelper {
         limit: Int = 10
     ): List<SearchResult> {
         val started = System.currentTimeMillis()
-        val fast = runCatching { InnerTubeHelper.searchVideos(query, limit = 20) }.getOrDefault(emptyList())
-        if (fast.isNotEmpty()) {
-            val elapsed = System.currentTimeMillis() - started
-            Log.d("SEARCH", "'$query' InnerTube ${fast.size} results in ${elapsed}ms")
-            DiagnosticsManager.recordSearch(true, elapsed, "${fast.size} results via InnerTube")
-            return scoreResults(
-                fast.map { Raw(it.videoId, it.title, it.durationMs) },
-                limit
-            )
-        }
-        val slowStarted = System.currentTimeMillis()
-        Log.w("SEARCH", "InnerTube returned nothing for '$query'; falling back to yt-dlp")
-        val result = runCatching { searchWithYtdlp(context, query, limit) }
-            .onFailure {
-                DiagnosticsManager.recordSearch(
-                    false, System.currentTimeMillis() - started,
-                    "InnerTube empty, yt-dlp failed: ${it.message}"
-                )
+        Log.d("SEARCH", "'$query' searching via yt-dlp")
+        
+        return withContext(Dispatchers.IO) {
+            try {
+                val result = searchWithYtdlp(context, query, limit)
+                val elapsed = System.currentTimeMillis() - started
+                if (result.isNotEmpty()) {
+                    DiagnosticsManager.recordSearch(
+                        true, elapsed,
+                        "${result.size} results via yt-dlp"
+                    )
+                    Log.d("SEARCH", "'$query' found ${result.size} results in ${elapsed}ms")
+                } else {
+                    DiagnosticsManager.recordSearch(false, elapsed, "No results")
+                    Log.w("SEARCH", "'$query' returned no results")
+                }
+                result
+            } catch (e: Exception) {
+                DiagnosticsManager.recordSearch(false, System.currentTimeMillis() - started, e.message ?: "Unknown error")
+                Log.e("SEARCH", "'$query' failed: ${e.message}", e)
+                emptyList()
             }
-            .getOrDefault(emptyList())
-        if (result.isNotEmpty()) {
-            DiagnosticsManager.recordSearch(
-                true, System.currentTimeMillis() - started,
-                "${result.size} results via yt-dlp fallback (${System.currentTimeMillis() - slowStarted}ms)"
-            )
         }
-        return result
     }
 
     // Duration/junk filters and the "official audio" boost, shared by both paths.

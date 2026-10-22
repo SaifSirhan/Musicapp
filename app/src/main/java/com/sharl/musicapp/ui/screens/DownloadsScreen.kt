@@ -1,6 +1,9 @@
 package com.sharl.musicapp.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,7 +17,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
@@ -40,7 +47,9 @@ import com.sharl.musicapp.ui.util.youtubeThumb
 
 enum class DownloadMenuAction { PLAY_NEXT, ADD_TO_QUEUE, START_MIX, GO_TO_ARTIST }
 
-@OptIn(ExperimentalMaterial3Api::class)
+enum class SortOption { DATE_ADDED, ARTIST_AZ, TITLE_AZ }
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun DownloadsScreen(
     downloads: List<Download>,
@@ -49,9 +58,27 @@ fun DownloadsScreen(
     onRemove: (Download) -> Unit,
     onRemoveAll: () -> Unit,
     onFindMusic: () -> Unit,
-    onMenuAction: (Download, DownloadMenuAction) -> Unit = { _, _ -> }
+    onMenuAction: (Download, DownloadMenuAction) -> Unit = { _, _ -> },
+    onBulkDelete: (List<Download>) -> Unit = {}
 ) {
     var menuDownload by remember { mutableStateOf<Download?>(null) }
+    
+    // Phase 42: Multi-select mode
+    var isMultiSelectMode by remember { mutableStateOf(false) }
+    val selectedIds = remember { mutableStateOf<Set<String>>(emptySet()) }
+    
+    // Phase 42: Sorting
+    var sortOption by remember { mutableStateOf(SortOption.DATE_ADDED) }
+    var showSortMenu by remember { mutableStateOf(false) }
+    
+    val sortedDownloads = remember(downloads, sortOption) {
+        when (sortOption) {
+            SortOption.DATE_ADDED -> downloads
+            SortOption.ARTIST_AZ -> downloads.sortedBy { it.artist.lowercase() }
+            SortOption.TITLE_AZ -> downloads.sortedBy { it.title.lowercase() }
+        }
+    }
+    
     if (downloads.isEmpty()) {
         Column(
             modifier = Modifier.fillMaxSize(),
@@ -77,36 +104,115 @@ fun DownloadsScreen(
     }
 
     val totalBytes = downloads.sumOf { it.fileSizeBytes }
-    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Phase 42: Header with storage info, sort button, and multi-select toggle
         Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "${downloads.size} songs · ${formatBytes(totalBytes)}",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                "${downloads.size} Songs · ${formatBytes(totalBytes)}",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f)
             )
-            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                IconButton(onClick = onRemoveAll) {
-                    Text(
-                        "⋮",
-                        style = MaterialTheme.typography.titleLarge
-                    )
+            
+            // Sort button
+            Box {
+                IconButton(onClick = { showSortMenu = true }) {
+                    Text("⇅", style = MaterialTheme.typography.titleLarge)
+                }
+                DropdownMenu(
+                    expanded = showSortMenu,
+                    onDismissRequest = { showSortMenu = false }
+                ) {
+                    SortOption.values().forEach { option ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    when (option) {
+                                        SortOption.DATE_ADDED -> "Date Added"
+                                        SortOption.ARTIST_AZ -> "Artist A-Z"
+                                        SortOption.TITLE_AZ -> "Title A-Z"
+                                    }
+                                )
+                            },
+                            onClick = {
+                                sortOption = option
+                                showSortMenu = false
+                            },
+                            trailingIcon = {
+                                if (sortOption == option) {
+                                    Text("✓", color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        )
+                    }
                 }
             }
+            
+            // Multi-select toggle
+            IconButton(onClick = { 
+                isMultiSelectMode = !isMultiSelectMode
+                if (!isMultiSelectMode) selectedIds.value = emptySet()
+            }) {
+                Text(if (isMultiSelectMode) "✓" else "☐", style = MaterialTheme.typography.titleLarge)
+            }
         }
+        
+        HorizontalDivider()
+        
         LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
-            itemsIndexed(downloads, key = { _, d -> d.videoId }) { idx, d ->
+            itemsIndexed(sortedDownloads, key = { _, d -> d.videoId }) { idx, d ->
                 val st = downloadStates[d.videoId]
+                val isSelected = selectedIds.value.contains(d.videoId)
+                
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onPlay(idx) }
+                        .combinedClickable(
+                            onClick = {
+                                if (isMultiSelectMode) {
+                                    val current = selectedIds.value.toMutableSet()
+                                    if (current.contains(d.videoId)) {
+                                        current.remove(d.videoId)
+                                    } else {
+                                        current.add(d.videoId)
+                                    }
+                                    selectedIds.value = current
+                                } else {
+                                    onPlay(idx)
+                                }
+                            },
+                            onLongClick = {
+                                if (!isMultiSelectMode) {
+                                    isMultiSelectMode = true
+                                    selectedIds.value = setOf(d.videoId)
+                                }
+                            }
+                        )
+                        .background(
+                            if (isSelected) MaterialTheme.colorScheme.surfaceVariant
+                            else androidx.compose.ui.graphics.Color.Transparent
+                        )
                         .padding(vertical = 8.dp, horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Checkbox in multi-select mode
+                    if (isMultiSelectMode) {
+                        Checkbox(
+                            checked = isSelected,
+                            onCheckedChange = {
+                                val current = selectedIds.value.toMutableSet()
+                                if (it) current.add(d.videoId) else current.remove(d.videoId)
+                                selectedIds.value = current
+                            },
+                            modifier = Modifier.padding(end = 8.dp)
+                        )
+                    }
+                    
                     Thumbnail(d.thumbnailUrl ?: youtubeThumb(d.videoId), 56.dp)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
@@ -151,6 +257,34 @@ fun DownloadsScreen(
                 HorizontalDivider()
             }
             item { Spacer(Modifier.height(96.dp)) }
+        }
+        
+        // Phase 42: BottomAppBar for bulk actions in multi-select mode
+        if (isMultiSelectMode && selectedIds.value.isNotEmpty()) {
+            BottomAppBar(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                Text(
+                    "${selectedIds.value.size} selected",
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(start = 16.dp)
+                )
+                Spacer(Modifier.weight(1f))
+                IconButton(onClick = {
+                    val selectedDownloads = sortedDownloads.filter { it.videoId in selectedIds.value }
+                    onBulkDelete(selectedDownloads)
+                    isMultiSelectMode = false
+                    selectedIds.value = emptySet()
+                }) {
+                    Text("🗑", style = MaterialTheme.typography.titleLarge)
+                }
+                IconButton(onClick = {
+                    isMultiSelectMode = false
+                    selectedIds.value = emptySet()
+                }) {
+                    Text("✕", style = MaterialTheme.typography.titleLarge)
+                }
+            }
         }
     }
 

@@ -79,12 +79,12 @@ import com.sharl.musicapp.data.DownloadRepository
 import com.sharl.musicapp.data.FollowRepository
 import com.sharl.musicapp.data.FriendsRepository
 import com.sharl.musicapp.data.ImportRepository
-import com.sharl.musicapp.data.InnerTubeHelper
 import com.sharl.musicapp.data.LocalMedia
 import com.sharl.musicapp.data.LocalMediaRepository
 import com.sharl.musicapp.data.MixRepository
 import com.sharl.musicapp.data.ResolutionStats
 import com.sharl.musicapp.data.StreamingBlockedException
+import com.sharl.musicapp.data.OfflineException
 import com.sharl.musicapp.data.NewDropsRepository
 import com.sharl.musicapp.data.NowPlaying
 import com.sharl.musicapp.data.PlaybackCache
@@ -651,6 +651,28 @@ fun PlayerScreen(
             try {
                 Log.d("RESOLVE", "yt-dlp extract $videoId")
                 
+                // Phase 42: Check connectivity before attempting download
+                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+                val isConnected = cm?.activeNetworkInfo?.isConnected == true
+                
+                if (!isConnected) {
+                    // Check if file is already cached locally
+                    val cachedFile = Downloader.cachedStreamFile(context, videoId)
+                    if (cachedFile != null && cachedFile.exists()) {
+                        Log.d("RESOLVE", "Offline mode - using cached file for $videoId")
+                        val uri = android.net.Uri.fromFile(cachedFile).toString()
+                        return@withContext uri to SongMetadata(
+                            title = fallbackTitle ?: videoId,
+                            artist = "",
+                            album = null,
+                            thumbnailUrl = youtubeThumb(videoId)
+                        )
+                    } else {
+                        Log.w("RESOLVE", "Offline and not cached: $videoId")
+                        throw OfflineException("Song not downloaded")
+                    }
+                }
+                
                 // Use Downloader.cacheForPlayback which already runs on IO dispatcher
                 // and handles mutex locking internally
                 val cachedFile = Downloader.cacheForPlayback(context, videoId)
@@ -671,6 +693,8 @@ fun PlayerScreen(
                     album = null,
                     thumbnailUrl = youtubeThumb(videoId)
                 )
+            } catch (e: OfflineException) {
+                throw e
             } catch (e: Exception) {
                 Log.e("RESOLVE", "yt-dlp exception for $videoId: ${e.message}", e)
                 return@withContext null
@@ -1099,7 +1123,9 @@ fun PlayerScreen(
                 Log.e("YTDL", "Failed: $msg")
                 status = "Error: $msg"
                 snackbarHostState.showSnackbar(
-                    if (e is StreamingBlockedException) {
+                    if (e is OfflineException) {
+                        "Offline: Song not downloaded. Connect to internet to download."
+                    } else if (e is StreamingBlockedException) {
                         e.message ?: "Streaming failed: YouTube API blocked."
                     } else {
                         "Couldn't play this track. Check your connection and try again."
@@ -1387,6 +1413,8 @@ fun PlayerScreen(
         status = "Not interested: ${song.title}"
     }
 
+    // Phase 42: Removed - depended on InnerTube streaming. Local-first only.
+    /*
     fun discoverUnderground() {
         if (undergroundLoading) return
         scope.launch {
@@ -1418,6 +1446,7 @@ fun PlayerScreen(
             }
         }
     }
+    */
 
     fun toggleFollow(artist: String) {
         followRepo.toggle(artist)
@@ -2015,7 +2044,8 @@ fun PlayerScreen(
                         followedArtists.any { it.equals(a, ignoreCase = true) }
                     } ?: false,
                     onToggleFollowTopArtist = { topArtistName?.let { toggleFollow(it) } },
-                    onDiscoverUnderground = { discoverUnderground() },
+                    // Phase 42: Disabled - depended on InnerTube streaming
+                    // onDiscoverUnderground = { discoverUnderground() },
                     undergroundLoading = undergroundLoading,
                 )
             }
