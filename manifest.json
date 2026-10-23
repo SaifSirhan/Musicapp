@@ -1,7 +1,7 @@
 {
-  "versionCode": 20,
-  "versionName": "0.19.0",
-  "apkUrl": "https://github.com/SaifSirhan/Musicapp/releases/download/v0.19.0/app-release.apk",
-  "sha256": "5198f75ba7c1ab6d15e6e6f3ece34921f6e0a31863e98f16d599236712e5297e",
-  "notes": "Playback failures now report the real cause (HTTP status and ExoPlayer error code) instead of a blanket \"YouTube API blocked\". YouTube Music import uses the browser OAuth flow so any Google account can be chosen; it needs GOOGLE_OAUTH_REDIRECT_URI and GOOGLE_OAUTH_CLIENT_SECRET configured to connect. Test-only probes removed."
+  "versionCode": 23,
+  "versionName": "1.0.0",
+  "apkUrl": "https://github.com/SaifSirhan/Musicapp/releases/download/v1.0.0/app-release.apk",
+  "sha256": "47390d5915abeb338b2b3178e30b097328961c47777816ed026345308fa78795",
+  "notes": "Official 1.0.0 launch: local-first playback, crash-safe downloads owned by a foreground service, and strict album/channel filtering that blocks fan compilations, sketch uploads and other non-music results."
 }
