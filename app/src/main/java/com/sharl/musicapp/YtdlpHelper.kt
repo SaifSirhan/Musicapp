@@ -8,9 +8,11 @@ import com.sharl.musicapp.data.album.AlbumCard
 import com.sharl.musicapp.data.album.AlbumListing
 import com.sharl.musicapp.data.album.AlbumResolver
 import com.sharl.musicapp.data.album.DefensiveAlbumResolver
+import com.sharl.musicapp.data.album.MusicBrainzDiscographyProvider
 import com.sharl.musicapp.data.album.MusicBrainzTracklistProvider
 import com.sharl.musicapp.data.album.UrlConnectionTextFetcher
 import com.sharl.musicapp.data.matching.TitleNormalizer
+import com.sharl.musicapp.data.matching.UploadFilter
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDL.UpdateChannel
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -35,7 +37,8 @@ data class SongMetadata(
 data class AlbumResult(
     val title: String,
     val videoId: String,
-    val thumbnailUrl: String?
+    val thumbnailUrl: String?,
+    val year: String? = null
 )
 
 object YtdlpHelper {
@@ -98,12 +101,6 @@ object YtdlpHelper {
                 null
             }
         }
-
-    // Junk titles that are almost never a single song.
-    private val SEARCH_JUNK = listOf(
-        "mix", "playlist", "compilation", "1 hour", "10 hours",
-        "full album", "livestream", "podcast"
-    )
 
     private const val MIN_DURATION_MS = 45_000L
     private const val MIN_ALBUM_TRACK_MS = 20_000L
@@ -182,11 +179,39 @@ object YtdlpHelper {
         return unique.values.toList()
     }
 
-    private fun scoreResults(raw: List<Raw>, limit: Int): List<SearchResult> =
-        dedupeByTitle(raw)
+    private suspend fun searchWithYtdlp(
+        context: Context,
+        query: String,
+        limit: Int
+    ): List<SearchResult> {
+        val raw = fetchSearchEntries(context, "ytsearch20:$query")
+        return select(raw, query, limit, strictChannel = true).ifEmpty {
+            Log.d("SEARCH", "'$query' had no trusted upload; using the ordered fallback")
+            select(raw, query, limit, strictChannel = false)
+        }
+    }
+
+    /**
+     * Task 4: strict admission first, and when nothing qualifies fall back to the
+     * standard listing with `- Topic` channels ahead of everything else.
+     */
+    private fun select(
+        raw: List<Raw>,
+        artist: String,
+        limit: Int,
+        strictChannel: Boolean
+    ): List<SearchResult> =
+        dedupeByTitle(raw, artist)
             .filter { it.durationMs == null || it.durationMs in MIN_DURATION_MS..MAX_TRACK_MS }
-            .filter { r -> SEARCH_JUNK.none { r.title.contains(it, ignoreCase = true) } }
-            .sortedByDescending { it.quality }
+            .filter {
+                UploadFilter.rejectionReason(
+                    artist, it.channel, it.title, it.durationMs,
+                    albumContext = false, strictChannel = strictChannel
+                ) == null
+            }
+            .sortedWith(
+                compareBy({ UploadFilter.priority(UploadFilter.trust(artist, it.channel)) }, { -it.quality })
+            )
             .distinctBy { it.videoId }
             .take(limit.coerceAtMost(10))
             .map { r ->
@@ -198,17 +223,6 @@ object YtdlpHelper {
                     channel = r.channel
                 )
             }
-
-    private suspend fun searchWithYtdlp(
-        context: Context,
-        query: String,
-        limit: Int
-    ): List<SearchResult> {
-        // --flat-playlist pulls metadata for each entry without visiting its
-        // page (~2s vs ~11s), and --dump-single-json gives one parseable object.
-        val raw = fetchSearchEntries(context, "ytsearch20:$query")
-        return scoreResults(raw, limit)
-    }
 
     private data class Listing(val title: String?, val entries: List<Raw>)
 
@@ -329,10 +343,14 @@ object YtdlpHelper {
         fetchSearchEntries(context, "ytsearch20:$query")
             .filter { r ->
                 val duration = r.durationMs
-                (duration == null || duration <= 0 || duration in MIN_ALBUM_TRACK_MS..MAX_TRACK_MS) &&
-                    !r.title.contains("full album", ignoreCase = true)
+                duration == null || duration <= 0 || duration in MIN_ALBUM_TRACK_MS..MAX_TRACK_MS
             }
-            .sortedByDescending { it.quality }
+            .sortedWith(
+                compareBy(
+                    { UploadFilter.priority(UploadFilter.trust(query, it.channel)) },
+                    { -it.quality }
+                )
+            )
             .take(limit.coerceIn(1, 20))
             .map {
                 AlbumCandidate(
@@ -394,19 +412,43 @@ object YtdlpHelper {
         }
     }
 
-    // Album uploads legitimately carry "full album" in the title, so they get a
-    // narrower junk list than track search.
-    private val ALBUM_JUNK = listOf(
-        "mix", "playlist", "livestream", "podcast", "1 hour", "10 hours"
-    )
+    @Volatile
+    private var discography: MusicBrainzDiscographyProvider? = null
 
-    // Phase 47: album discovery for the artist discography section. YouTube
-    // "full album" uploads are the most reliable public source of an artist's
-    // album list, so we search for those and clean the titles down to names.
+    private fun discographyFor(): MusicBrainzDiscographyProvider =
+        discography ?: synchronized(this) {
+            discography ?: MusicBrainzDiscographyProvider(
+                UrlConnectionTextFetcher(),
+                log = { Log.d("DISCOGRAPHY", it) }
+            ).also { discography = it }
+        }
+
+    /**
+     * Phase 51: the discography grid is the artist's official release list. YouTube
+     * "full album" uploads are fan re-uploads, so they only serve as a fallback when
+     * the catalog has nothing, and every fallback card passes [UploadFilter].
+     */
     suspend fun searchAlbums(
         context: Context,
         artist: String,
         limit: Int = 10
+    ): List<AlbumResult> = withContext(Dispatchers.IO) {
+        val official = runCatching { discographyFor().studioAlbums(artist, limit) }
+            .getOrElse {
+                Log.w("ARTIST", "Official catalog unavailable for '$artist': ${it.message}")
+                emptyList()
+            }
+        if (official.isNotEmpty()) {
+            Log.d("ARTIST", "Catalog albums for '$artist': ${official.map { it.title }}")
+            return@withContext official.map { AlbumResult(it.title, "", null, it.year) }
+        }
+        youtubeAlbumUploads(context, artist, limit)
+    }
+
+    private suspend fun youtubeAlbumUploads(
+        context: Context,
+        artist: String,
+        limit: Int
     ): List<AlbumResult> = withContext(Dispatchers.IO) {
         try {
             ensureInitialized(context)
@@ -421,34 +463,65 @@ object YtdlpHelper {
             val root = org.json.JSONObject(response.out.substring(start.coerceAtLeast(0)))
             val entries = root.optJSONArray("entries") ?: org.json.JSONArray()
 
-            val artistLower = artist.lowercase()
-            val seen = HashSet<String>()
-            val albums = ArrayList<AlbumResult>()
-
+            val parsed = ArrayList<Raw>()
+            val thumbnails = HashMap<String, String>()
             for (i in 0 until entries.length()) {
                 val e = entries.optJSONObject(i) ?: continue
                 val videoId = e.optString("id").ifBlank { e.optString("url") }
                 if (videoId.isBlank()) continue
                 val raw = e.optString("title")
                 if (raw.isBlank()) continue
-                if (ALBUM_JUNK.any { raw.contains(it, ignoreCase = true) }) continue
-                val name = cleanAlbumTitle(raw, artist)
-                if (name.isBlank() || !seen.add(name.lowercase())) continue
-
+                val durationMs = if (e.has("duration") && !e.isNull("duration")) {
+                    (e.optDouble("duration", -1.0) * 1000).toLong().takeIf { it > 0 }
+                } else null
+                val channel = e.optString("channel").ifBlank { e.optString("uploader") }
+                    .takeIf { it.isNotBlank() && it != "NA" }
                 val thumbnail = e.optJSONArray("thumbnails")?.let { arr ->
-                    val last = arr.optJSONObject(arr.length() - 1)
-                    last?.optString("url")?.takeIf { it.isNotBlank() }
+                    arr.optJSONObject(arr.length() - 1)?.optString("url")?.takeIf { it.isNotBlank() }
                 } ?: e.optString("thumbnail").takeIf { it.isNotBlank() }
-
-                albums += AlbumResult(name, videoId, thumbnail)
-                if (albums.size >= limit) break
+                if (thumbnail != null) thumbnails[raw] = thumbnail
+                parsed += Raw(videoId, raw, durationMs, channel, qualityRank(raw, channel))
             }
-            Log.d("ARTIST", "Albums for '$artist': ${albums.map { it.title }}")
+
+            val albums = admitAlbums(parsed, artist, limit) { thumbnails[it] }
+            Log.d("ARTIST", "Fallback albums for '$artist': ${albums.map { it.title }}")
             albums
         } catch (e: Exception) {
             Log.e("ARTIST", "Album search failed for '$artist': ${e.message}", e)
             emptyList()
         }
+    }
+
+    /** Task 4: trusted uploads only first, then the standard listing with `- Topic` first. */
+    private fun admitAlbums(
+        raw: List<Raw>,
+        artist: String,
+        limit: Int,
+        thumbnailOf: (String) -> String?
+    ): List<AlbumResult> {
+        for (strict in listOf(true, false)) {
+            val albums = ArrayList<AlbumResult>()
+            val seen = HashSet<String>()
+            val ordered = raw.sortedWith(
+                compareBy({ UploadFilter.priority(UploadFilter.trust(artist, it.channel)) }, { -it.quality })
+            )
+            for (entry in ordered) {
+                val reason = UploadFilter.rejectionReason(
+                    artist, entry.channel, entry.title, entry.durationMs,
+                    albumContext = true, strictChannel = strict
+                )
+                if (reason != null) {
+                    Log.d("ARTIST", "dropped '${entry.title}' ($reason)")
+                    continue
+                }
+                val name = cleanAlbumTitle(entry.title, artist)
+                if (name.isBlank() || !seen.add(name.lowercase())) continue
+                albums += AlbumResult(name, entry.videoId, thumbnailOf(entry.title))
+                if (albums.size >= limit) break
+            }
+            if (albums.isNotEmpty()) return albums
+        }
+        return emptyList()
     }
 
     private fun cleanAlbumTitle(raw: String, artist: String): String {        var t = raw

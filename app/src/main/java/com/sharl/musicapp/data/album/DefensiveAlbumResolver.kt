@@ -1,6 +1,7 @@
 package com.sharl.musicapp.data.album
 
 import com.sharl.musicapp.data.matching.CandidateRanker
+import com.sharl.musicapp.data.matching.UploadFilter
 import com.sharl.musicapp.data.matching.TitleNormalizer
 import com.sharl.musicapp.data.matching.TrackCandidate
 import com.sharl.musicapp.data.matching.TrackTarget
@@ -28,7 +29,6 @@ class DefensiveAlbumResolver(
         const val MIN_TRACK_MS = 20_000L
         const val MAX_TRACK_MS = 30L * 60 * 1000
         const val MAX_ALBUM_PROBES = 3
-        val SEARCH_JUNK = listOf("full album", "livestream")
     }
 
     private data class CacheEntry(val at: Long, val value: AlbumResolution)
@@ -191,7 +191,7 @@ class DefensiveAlbumResolver(
                 trackNumber = target.trackNumber
             )
         }
-        val rankedCandidates = candidates.map { candidate ->
+        val rankedCandidates = vet(artist, candidates).map { candidate ->
             TrackCandidate(
                 videoId = candidate.videoId,
                 rawTitle = candidate.title,
@@ -257,9 +257,7 @@ class DefensiveAlbumResolver(
 
         val unique = ArrayList<AlbumCandidate>()
         val seenIds = HashSet<String>()
-        for (candidate in raw) {
-            if (!isValidCandidate(candidate)) continue
-            if (SEARCH_JUNK.any { candidate.title.contains(it, ignoreCase = true) }) continue
+        for (candidate in vet(artist, raw.filter(::isValidCandidate))) {
             if (!seenIds.add(candidate.videoId)) continue
             if (unique.any { AlbumTrackMetadata.sameRecording(it, candidate) }) continue
             unique.add(candidate)
@@ -309,10 +307,24 @@ class DefensiveAlbumResolver(
 
     private fun isValidCandidate(candidate: AlbumCandidate): Boolean {
         if (candidate.videoId.isBlank() || candidate.title.isBlank()) return false
-        if (candidate.title.contains("full album", ignoreCase = true)) return false
         val duration = candidate.durationMs?.takeIf { it > 0 } ?: return true
         return duration in MIN_TRACK_MS..MAX_TRACK_MS
     }
+
+    /**
+     * Task 2 and Task 4 for album tracks: covers, tabs and practice takes are dropped
+     * unless the channel is the label, the artist, or VEVO, and `- Topic` uploads are
+     * ordered first. Channels are never hard-rejected here, because a track's uploader
+     * is legitimately the label rather than the artist, and YouTube Music song entries
+     * carry no channel at all.
+     */
+    private fun vet(artist: String, candidates: List<AlbumCandidate>): List<AlbumCandidate> =
+        candidates.filter {
+            UploadFilter.rejectionReason(
+                artist, it.artist, it.title, it.durationMs,
+                albumContext = false, strictChannel = false
+            ) == null
+        }
 
     private fun titlesMatch(targetCore: String, listingTitle: String): Boolean {
         if (targetCore.isBlank()) return false

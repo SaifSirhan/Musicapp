@@ -481,10 +481,14 @@ fun ArtistScreen(
                                     .padding(8.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                Thumbnail(a.thumbnailUrl ?: youtubeThumb(a.videoId), 72.dp)
+                                Thumbnail(
+                                    a.thumbnailUrl
+                                        ?: a.videoId.takeIf { it.isNotBlank() }?.let(::youtubeThumb),
+                                    72.dp
+                                )
                                 Spacer(Modifier.height(4.dp))
                                 Text(
-                                    a.title,
+                                    a.year?.let { "${a.title} ($it)" } ?: a.title,
                                     style = MaterialTheme.typography.bodySmall,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis

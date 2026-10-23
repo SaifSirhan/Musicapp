@@ -379,4 +379,52 @@ class DefensiveAlbumResolverTest {
         assertTrue(result.tracks.isEmpty())
         assertTrue(result.warnings.isNotEmpty())
     }
+
+    @Test
+    fun untrustedUploadsAreDroppedAndTrustedCopiesKeepTheirOrder() = runBlocking {
+        val catalog = FakeCatalog(youtubeResults = {
+            listOf(
+                candidate("lyrics", "The Stroke (Lyrics)", "Fake Lyric Channel", 220_000),
+                candidate("artist", "The Stroke", "The Strokes", 220_000),
+                candidate("topic", "The Stroke", "The Strokes - Topic", 219_000)
+            )
+        })
+        val result = DefensiveAlbumResolver(catalog, searchSpacingMs = 0)
+            .resolve("The Strokes", "Is This It")
+
+        assertEquals(AlbumResolutionSource.SEARCH_FALLBACK, result.source)
+        // The first trusted copy wins so a duration-boundary variant is never re-anchored;
+        // the untrusted lyric upload is gone rather than merely ranked lower.
+        assertEquals(listOf("artist"), result.tracks.map { it.videoId })
+    }
+
+    @Test
+    fun coversAndTabsNeverSurviveEvenAsTheOnlyMatch() = runBlocking {
+        val catalog = FakeCatalog(youtubeResults = {
+            listOf(
+                candidate("tab", "Reptilia (Guitar Cover + Tab Tutorial)", "Guitar Tabs 101", 210_000),
+                candidate("karaoke", "Reptilia Karaoke Version", "Karaoke Box", 210_000)
+            )
+        })
+        val result = DefensiveAlbumResolver(catalog, searchSpacingMs = 0)
+            .resolve("The Strokes", "Room on Fire")
+
+        assertEquals(AlbumResolutionSource.NONE, result.source)
+        assertTrue(result.tracks.isEmpty())
+    }
+
+    @Test
+    fun unknownArtistFallsBackToTheStandardSearchWithTopicFirst() = runBlocking {
+        val catalog = FakeCatalog(youtubeResults = {
+            listOf(
+                candidate("smalllabel", "First Song", "Tiny Label Records", 200_000),
+                candidate("repost", "First Song Repost", "Repost Factory", 200_000)
+            )
+        })
+        val result = DefensiveAlbumResolver(catalog, searchSpacingMs = 0)
+            .resolve("Underground Act", "Debut EP")
+
+        assertEquals(AlbumResolutionSource.SEARCH_FALLBACK, result.source)
+        assertEquals(listOf("smalllabel"), result.tracks.map { it.videoId })
+    }
 }

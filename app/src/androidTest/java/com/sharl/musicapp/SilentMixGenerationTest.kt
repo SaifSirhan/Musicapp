@@ -29,7 +29,10 @@ class SilentMixGenerationTest {
         )
         val mix = MixRepository(context).generateMix(seed)
         assertTrue("station should contain the seed", mix.first().videoId == seed.videoId)
-        assertTrue("station should add neighbours, got ${mix.size}", mix.size > 5)
+        // Phase 51b: the non-music blocklist drops cover and remix variants from the web
+        // pool, so the station is smaller than before by design. It must still add
+        // neighbours beyond the seed.
+        assertTrue("station should add neighbours, got ${mix.size}", mix.size > 2)
         assertTrue(
             "station must be deduplicated",
             mix.map { it.videoId }.distinct().size == mix.size
