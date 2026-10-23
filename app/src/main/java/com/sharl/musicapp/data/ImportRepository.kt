@@ -3,6 +3,7 @@ package com.sharl.musicapp.data
 import android.content.Context
 import android.util.Log
 import com.sharl.musicapp.Downloader
+import com.sharl.musicapp.data.matching.TitleNormalizer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -78,7 +79,9 @@ class ImportRepository(private val context: Context) {
                                     lastPlayedAt = 0L,
                                     playCount = 0,
                                     isFavorite = false,
-                                    isHidden = false
+                                    isHidden = false,
+                                    normalizedTitle = TitleNormalizer.normalizedCore(track.title, track.artist),
+                                    normalizedTitleVersion = TitleNormalizer.NORMALIZATION_VERSION
                                 )
                             )
                         }

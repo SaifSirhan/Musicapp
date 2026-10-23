@@ -52,8 +52,7 @@ fun ArtistScreen(
     context: Context,
     scope: CoroutineScope,
     onPlay: (List<QueueItem>, Int) -> Unit,
-    // videoId, title, artist, album, track number
-    onDownload: (String, String, String, String?, Int?) -> Unit,
+    onDownload: (String, String, String, String?, Int?, Long) -> Unit,
     downloadedIds: Set<String>,
     onDownloadDiscography: (String) -> Unit,
     onBack: () -> Unit
@@ -92,12 +91,10 @@ fun ArtistScreen(
         val album = selectedAlbum ?: return@LaunchedEffect
         albumTracksLoading = true
         albumTracks = YtdlpHelper.searchAlbumTracks(
-            context, artistName, album.title, limit = 20
+            context, artistName,
+            album.videoId.takeIf { com.sharl.musicapp.data.album.AlbumInput.isId(it) } ?: album.title,
+            limit = 100
         )
-        if (albumTracks.isEmpty()) {
-            // Some album titles are too noisy to find individual tracks.
-            albumTracks = YtdlpHelper.searchYouTube(context, "$artistName songs", limit = 20)
-        }
         albumTracksLoading = false
     }
 
@@ -171,7 +168,7 @@ fun ArtistScreen(
                         onClick = {
                             albumTracks.forEachIndexed { idx, t ->
                                 if (t.videoId !in downloadedIds) {
-                                    onDownload(t.videoId, t.title, artistName, album.title, idx + 1)
+                                    onDownload(t.videoId, t.title, t.channel.orEmpty(), album.title, idx + 1, t.durationMs ?: 0L)
                                 }
                             }
                         },
@@ -286,9 +283,10 @@ fun ArtistScreen(
                                     onDownload(
                                         result.videoId,
                                         result.title,
-                                        artistName,
+                                        result.channel.orEmpty(),
                                         album.title,
-                                        trackNumber.takeIf { it > 0 }
+                                        trackNumber.takeIf { it > 0 },
+                                        result.durationMs ?: 0L
                                     )
                                 }
                             ) {
@@ -548,7 +546,7 @@ fun ArtistScreen(
                         }
                         IconButton(
                             onClick = {
-                                onDownload(result.videoId, result.title, artistName, null, null)
+                                onDownload(result.videoId, result.title, artistName, null, null, result.durationMs ?: 0L)
                             }
                         ) {
                             Text("⬇", style = MaterialTheme.typography.titleLarge)

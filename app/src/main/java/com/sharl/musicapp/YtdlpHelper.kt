@@ -3,6 +3,14 @@ package com.sharl.musicapp
 import android.content.Context
 import android.util.Log
 import com.sharl.musicapp.data.DiagnosticsManager
+import com.sharl.musicapp.data.album.AlbumCandidate
+import com.sharl.musicapp.data.album.AlbumCard
+import com.sharl.musicapp.data.album.AlbumListing
+import com.sharl.musicapp.data.album.AlbumResolver
+import com.sharl.musicapp.data.album.DefensiveAlbumResolver
+import com.sharl.musicapp.data.album.MusicBrainzTracklistProvider
+import com.sharl.musicapp.data.album.UrlConnectionTextFetcher
+import com.sharl.musicapp.data.matching.TitleNormalizer
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDL.UpdateChannel
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -12,7 +20,9 @@ import kotlinx.coroutines.withContext
 data class SearchResult(
     val title: String,
     val videoId: String,
-    val url: String
+    val url: String,
+    val durationMs: Long? = null,
+    val channel: String? = null
 )
 
 data class SongMetadata(
@@ -99,30 +109,8 @@ object YtdlpHelper {
     private const val MIN_ALBUM_TRACK_MS = 20_000L
     private const val MAX_TRACK_MS = 10L * 60 * 1000
 
-    // Upload noise that should not distinguish two copies of the same song.
-    private val UPLOAD_NOISE = Regex(
-        "(?i)\\b(?:official\\s+(?:music\\s+)?video|official\\s+audio|lyric\\s+video|" +
-            "lyrics?|audio|visuali[sz]er|full\\s+album|hd|hq|4k)\\b"
-    )
-    private val BRACKETED_NOISE = Regex(
-        "(?i)[(\\[{][^)\\]}]*(?:official|lyrics?|audio|video|visuali[sz]er|" +
-            "full album|hd|hq|4k)[^)\\]}]*[)\\]}]"
-    )
-
-    fun normalizeTitle(raw: String, artist: String? = null): String {
-        var t = raw
-        if (!artist.isNullOrBlank()) {
-            t = t.replace(
-                Regex("^\\s*${Regex.escape(artist)}\\s*[-–—:]\\s*", RegexOption.IGNORE_CASE),
-                ""
-            )
-        }
-        t = t.replace(BRACKETED_NOISE, " ")
-        t = t.replace(UPLOAD_NOISE, " ")
-        t = t.replace(Regex("(?i)\\s*[-–—]\\s*(?:topic|album|single)\\s*$"), "")
-        t = t.replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim().lowercase()
-        return t.ifBlank { raw.trim().lowercase() }
-    }
+    fun normalizeTitle(raw: String, artist: String? = null): String =
+        TitleNormalizer.normalize(raw, artist).core
 
     // Topic channels are label-generated uploads of the clean album cut.
     private fun qualityRank(title: String, channel: String?): Int {
@@ -178,7 +166,8 @@ object YtdlpHelper {
         val title: String,
         val durationMs: Long?,
         val channel: String?,
-        val quality: Int
+        val quality: Int,
+        val playlistIndex: Int? = null
     )
 
     // Collapse alternate uploads of one song onto its normalized title, keeping
@@ -200,7 +189,15 @@ object YtdlpHelper {
             .sortedByDescending { it.quality }
             .distinctBy { it.videoId }
             .take(limit.coerceAtMost(10))
-            .map { r -> SearchResult(title = r.title, videoId = r.videoId, url = "https://www.youtube.com/watch?v=${r.videoId}") }
+            .map { r ->
+                SearchResult(
+                    title = r.title,
+                    videoId = r.videoId,
+                    url = "https://www.youtube.com/watch?v=${r.videoId}",
+                    durationMs = r.durationMs,
+                    channel = r.channel
+                )
+            }
 
     private suspend fun searchWithYtdlp(
         context: Context,
@@ -262,7 +259,8 @@ object YtdlpHelper {
             val channel = e.optString("channel").ifBlank {
                 e.optString("uploader").ifBlank { e.optString("artists") }
             }.takeIf { it.isNotBlank() && it != "NA" }
-            raw += Raw(videoId, title2, durationMs, channel, qualityRank(title2, channel))
+            val playlistIndex = e.optInt("playlist_index", -1).takeIf { it > 0 }
+            raw += Raw(videoId, title2, durationMs, channel, qualityRank(title2, channel), playlistIndex)
         }
         Listing(title, raw)
     }
@@ -280,32 +278,98 @@ object YtdlpHelper {
         }
     }
 
-    private fun albumBrowseUrls(entries: List<Raw>): List<String> =
-        entries.take(3).map { "https://music.youtube.com/browse/${it.videoId}" }
+    // Album cards are browse ids; their flat listing is the official, ordered tracklist.
+    // Flat album cards only carry a browse id; the album name comes from the
+    // playlist itself when it is probed.
+    internal suspend fun albumCards(context: Context, query: String): List<AlbumCard> =
+        fetchSearchEntries(context, musicSearchUrl(query, "albums"))
+            .filter { it.videoId.isNotBlank() }
+            .map { AlbumCard(browseId = it.videoId, title = it.title) }
 
-    private fun albumTracksFrom(
-        raw: List<Raw>,
-        artist: String,
-        limit: Int,
-        enforceMaxDuration: Boolean = true
-    ): List<SearchResult> =
-        dedupeByTitle(
-            raw.filter { r ->
-                val d = r.durationMs
-                val max = if (enforceMaxDuration) MAX_TRACK_MS else 30L * 60 * 1000
-                (d == null || d in MIN_ALBUM_TRACK_MS..max) &&
-                    !r.title.contains("full album", ignoreCase = true)
-            },
-            artist
-        )
-            .take(limit)
+    internal suspend fun albumListing(context: Context, browseId: String): AlbumListing? {
+        val url = com.sharl.musicapp.data.album.AlbumInput.playlistUrl(browseId) ?: return null
+        val listing = fetchListing(context, url)
+        val albumName = listing.title?.let(::cleanAlbumListingTitle)?.takeIf { it.isNotBlank() }
+            ?: return null
+        val tracks = listing.entries.mapIndexed { index, entry ->
+            AlbumCandidate(
+                videoId = entry.videoId,
+                title = entry.title,
+                artist = entry.channel,
+                durationMs = entry.durationMs,
+                albumTitle = albumName,
+                trackNumber = entry.playlistIndex ?: (index + 1)
+            )
+        }
+        return AlbumListing(albumName, tracks)
+    }
+
+    internal suspend fun songCandidates(
+        context: Context,
+        query: String,
+        limit: Int
+    ): List<AlbumCandidate> =
+        fetchSearchEntries(context, musicSearchUrl(query, "songs"))
+            .take(limit.coerceIn(1, 20))
             .map {
-                SearchResult(
-                    title = it.title,
+                AlbumCandidate(
                     videoId = it.videoId,
-                    url = "https://www.youtube.com/watch?v=${it.videoId}"
+                    title = it.title,
+                    artist = it.channel,
+                    durationMs = it.durationMs,
+                    isSongResult = true
                 )
             }
+
+    internal suspend fun youtubeCandidates(
+        context: Context,
+        query: String,
+        limit: Int
+    ): List<AlbumCandidate> =
+        fetchSearchEntries(context, "ytsearch20:$query")
+            .filter { r ->
+                val duration = r.durationMs
+                (duration == null || duration <= 0 || duration in MIN_ALBUM_TRACK_MS..MAX_TRACK_MS) &&
+                    !r.title.contains("full album", ignoreCase = true)
+            }
+            .sortedByDescending { it.quality }
+            .take(limit.coerceIn(1, 20))
+            .map {
+                AlbumCandidate(
+                    videoId = it.videoId,
+                    title = it.title,
+                    artist = it.channel,
+                    durationMs = it.durationMs
+                )
+            }
+
+    private fun cleanAlbumListingTitle(raw: String): String {
+        var title = raw.trim()
+        if (title.startsWith("Album - ", ignoreCase = true)) title = title.substring(8)
+        if (title.endsWith(" - Album", ignoreCase = true)) title = title.dropLast(8)
+        return title.trim()
+    }
+
+    @Volatile
+    private var albumResolver: AlbumResolver? = null
+
+    private fun resolverFor(context: Context): AlbumResolver =
+        albumResolver ?: synchronized(this) {
+            albumResolver ?: DefensiveAlbumResolver(
+                catalog = YtdlpAlbumCatalog(context.applicationContext),
+                tracklists = MusicBrainzTracklistProvider(UrlConnectionTextFetcher())
+            ).also { albumResolver = it }
+        }
+
+    /** Resolves a name or bare OLAK5uy/MPREb ID; preserves source, order and review warnings. */
+    suspend fun resolveAlbum(
+        context: Context,
+        albumNameOrId: String,
+        artist: String = "",
+        limit: Int = 50
+    ): com.sharl.musicapp.data.album.AlbumResolution = withContext(Dispatchers.IO) {
+        resolverFor(context).resolve(artist, albumNameOrId, limit)
+    }
 
     suspend fun searchAlbumTracks(
         context: Context,
@@ -313,55 +377,20 @@ object YtdlpHelper {
         albumTitle: String,
         limit: Int = 20
     ): List<SearchResult> = withContext(Dispatchers.IO) {
-        val query = "$artist $albumTitle".trim()
-        try {
-            var tracks = emptyList<SearchResult>()
-
-            // Album cards are browse ids, so probe the top results until one's
-            // title matches; its flat listing is the ordered official tracklist.
-            val albumCards = runCatching { fetchSearchEntries(context, musicSearchUrl(query, "albums")) }
-                .onFailure { Log.w("ALBUM", "YouTube Music album search failed: ${it.message}") }
-                .getOrDefault(emptyList())
-            val target = normalizeTitle(albumTitle).trim()
-            for (playlistUrl in albumBrowseUrls(albumCards)) {
-                val listing = runCatching { fetchListing(context, playlistUrl) }
-                    .onFailure { Log.w("ALBUM", "album probe failed for $playlistUrl: ${it.message}") }
-                    .getOrNull() ?: continue
-                val name = listing.title?.substringAfter("Album - ", listing.title).orEmpty()
-                val normalizedName = normalizeTitle(name).trim()
-                Log.d("ALBUM", "probe $playlistUrl -> '$name' (${listing.entries.size} tracks)")
-                val matches = target.isNotBlank() && normalizedName.isNotBlank() &&
-                    (normalizedName.contains(target) || target.contains(normalizedName))
-                if (matches) {
-                    tracks = albumTracksFrom(listing.entries, artist, limit, enforceMaxDuration = false)
-                    if (tracks.isNotEmpty()) {
-                        Log.d("ALBUM", "using official album '$name'")
-                        break
-                    }
-                }
-            }
-
-            if (tracks.isEmpty()) {
-                Log.w("ALBUM", "No matching album playlist for '$query'; trying YouTube Music songs")
-                val songs = runCatching { fetchSearchEntries(context, musicSearchUrl(query, "songs")) }
-                    .onFailure { Log.w("ALBUM", "YouTube Music songs search failed: ${it.message}") }
-                    .getOrDefault(emptyList())
-                tracks = albumTracksFrom(songs, artist, limit)
-            }
-
-            if (tracks.isEmpty()) {
-                Log.w("ALBUM", "YouTube Music yielded nothing for '$query'; falling back to ytsearch")
-                val raw = runCatching { fetchSearchEntries(context, "ytsearch20:$query") }
-                    .onFailure { Log.w("ALBUM", "ytsearch fallback failed: ${it.message}") }
-                    .getOrDefault(emptyList())
-                tracks = albumTracksFrom(raw, artist, limit)
-            }
-
-            Log.d("ALBUM", "'$query' -> ${tracks.map { it.title }}")
-            tracks
-        } catch (e: Exception) {
-            Log.e("ALBUM", "Album track search failed for '$artist / $albumTitle': ${e.message}", e)
-            emptyList()
+        val resolution = resolveAlbum(context, albumTitle, artist, limit)
+        Log.d(
+            "ALBUM",
+            "'$artist / $albumTitle' -> ${resolution.source} (${resolution.tracks.size} tracks)"
+        )
+        resolution.warnings.forEach { Log.w("ALBUM", it) }
+        resolution.tracks.map {
+            SearchResult(
+                title = it.title,
+                videoId = it.videoId,
+                url = "https://www.youtube.com/watch?v=${it.videoId}",
+                durationMs = it.durationMs,
+                channel = it.artist
+            )
         }
     }
 

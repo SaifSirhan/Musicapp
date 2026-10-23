@@ -51,7 +51,6 @@ fun ColumnScope.SearchTab(
     localMatches: List<Song>,
     onLocalMatchesChange: (List<Song>) -> Unit,
     onSearchLocal: suspend (String) -> List<Song>,
-    onPreExtract: suspend (String) -> Unit,
     scope: CoroutineScope,
     onPlayFromQueue: (List<QueueItem>, Int) -> Unit,
     onStartMix: (Song) -> Unit,
@@ -162,8 +161,6 @@ fun ColumnScope.SearchTab(
                 Log.d("YTDL", "search '${trimmed}' took ${android.os.SystemClock.elapsedRealtime() - t0}ms")
                 if (query.trim() == trimmed) {
                     onResultsChange(found)
-                    // Warm the first result so an immediate tap is instant.
-                    found.firstOrNull()?.videoId?.let { onPreExtract(it) }
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
@@ -294,10 +291,11 @@ fun ColumnScope.SearchTab(
         }
         itemsIndexed(results, key = { _, result -> "yt:${result.videoId}" }) { _, result ->
             val displayTitle = result.title.ifBlank { "Unknown Track" }
+            val artist = result.channel?.takeIf { it.isNotBlank() } ?: "YouTube"
             val song = Song(
                 videoId = result.videoId,
                 title = displayTitle,
-                artist = "YouTube",
+                artist = artist,
                 thumbnailUrl = youtubeThumb(result.videoId),
                 lastPlayedAt = 0L,
                 playCount = 0,
@@ -310,7 +308,7 @@ fun ColumnScope.SearchTab(
                     .combinedClickable(
                         onClick = { 
                             // Phase 43: Tap triggers download, not play
-                            onDownload(result.videoId, displayTitle, "YouTube")
+                            onDownload(result.videoId, displayTitle, artist)
                         },
                         onLongClick = { onSongMenu(song) }
                     )
@@ -348,7 +346,7 @@ fun ColumnScope.SearchTab(
                     // Not downloaded - show download icon
                     Spacer(Modifier.width(4.dp))
                     IconButton(
-                        onClick = { onDownload(result.videoId, displayTitle, "YouTube") },
+                        onClick = { onDownload(result.videoId, displayTitle, artist) },
                         modifier = Modifier.size(48.dp)
                     ) {
                         Text(

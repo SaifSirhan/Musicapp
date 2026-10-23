@@ -115,4 +115,66 @@ interface SongDao {
         LIMIT 1
     """)
     suspend fun randomAlbum(): String?
+
+    // Phase 50: same normalized title + artist within a duration tolerance is a
+    // duplicate identity. Unknown durations are never treated as duplicates.
+    @Query("""
+        SELECT * FROM songs
+        WHERE isHidden = 0
+          AND LOWER(artist) = LOWER(:artist)
+          AND normalizedTitle = :normalizedTitle
+          AND normalizedTitleVersion > 0
+          AND durationMs > 0
+          AND :durationMs > 0
+          AND ABS(durationMs - :durationMs) <= :toleranceMs
+        ORDER BY ABS(durationMs - :durationMs), playCount DESC
+        LIMIT 1
+    """)
+    suspend fun findNearDuplicate(
+        artist: String,
+        normalizedTitle: String,
+        durationMs: Long,
+        toleranceMs: Long
+    ): Song?
+
+    @Query("""
+        SELECT * FROM songs
+        WHERE normalizedTitle = :normalizedTitle
+          AND normalizedTitleVersion > 0
+          AND isHidden = 0
+        ORDER BY lastPlayedAt DESC
+        LIMIT :limit
+    """)
+    suspend fun findByNormalizedTitle(normalizedTitle: String, limit: Int): List<Song>
+
+    @Query("""
+        SELECT * FROM songs
+        WHERE normalizedTitleVersion < :version
+        ORDER BY videoId
+        LIMIT :limit
+    """)
+    suspend fun songsNeedingNormalization(version: Int, limit: Int): List<Song>
+
+    @Query("""
+        UPDATE songs
+        SET normalizedTitle = :normalizedTitle, normalizedTitleVersion = :version
+        WHERE videoId = :videoId
+    """)
+    suspend fun setNormalization(videoId: String, normalizedTitle: String, version: Int)
+
+    @Query("UPDATE songs SET durationMs = :durationMs WHERE videoId = :videoId")
+    suspend fun setDuration(videoId: String, durationMs: Long)
+
+    @Query("""
+        UPDATE songs
+        SET durationMs = (
+            SELECT d.durationMs FROM downloads d WHERE d.videoId = songs.videoId LIMIT 1
+        )
+        WHERE durationMs = 0
+          AND EXISTS (
+              SELECT 1 FROM downloads d
+              WHERE d.videoId = songs.videoId AND d.durationMs > 0
+          )
+    """)
+    suspend fun backfillDurationsFromDownloads(): Int
 }
