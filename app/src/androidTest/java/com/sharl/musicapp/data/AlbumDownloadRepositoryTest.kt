@@ -81,4 +81,35 @@ class AlbumDownloadRepositoryTest {
             file.delete()
         }
     }
+
+    @Test
+    fun queuedRowCarriesAlbumMetadataForAWorkerOutsideTheUi() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val tag = UUID.randomUUID().toString()
+        val id = "meta-$tag"
+        val db = AppDatabase.get(context)
+        val file = File(context.cacheDir, "meta-test-$tag.m4a")
+        var albumInRow: String? = null
+        var trackInRow: Int? = null
+        val repository = AlbumDownloadRepository(context) { request ->
+            db.downloadJobDao().get(request.videoId)?.let {
+                albumInRow = it.album
+                trackInRow = it.trackNumber
+            }
+            file.writeBytes(byteArrayOf(1))
+            Download(request.videoId, file.absolutePath, 1, 0, request.title, request.artist, null, request.durationMs)
+        }
+        try {
+            repository.downloadTrack(
+                DownloadRequest(id, "Meta song $tag", "Meta Artist", durationMs = 120_000), "Meta Album", 7
+            )
+            assertEquals("Meta Album", albumInRow)
+            assertEquals(7, trackInRow)
+        } finally {
+            db.openHelper.writableDatabase.execSQL("DELETE FROM download_jobs WHERE videoId = ?", arrayOf(id))
+            db.openHelper.writableDatabase.execSQL("DELETE FROM downloads WHERE videoId = ?", arrayOf(id))
+            db.openHelper.writableDatabase.execSQL("DELETE FROM songs WHERE videoId = ?", arrayOf(id))
+            file.delete()
+        }
+    }
 }

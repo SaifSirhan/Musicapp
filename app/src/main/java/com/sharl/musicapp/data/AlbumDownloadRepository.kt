@@ -26,7 +26,7 @@ class AlbumDownloadRepository(
 
     suspend fun downloadTrack(request: DownloadRequest, album: String?, trackNumber: Int?): Download =
         withContext(Dispatchers.IO) {
-            Downloader.enqueue(appContext, SettingsRepo(appContext), request)
+            Downloader.enqueue(appContext, SettingsRepo(appContext), request, album, trackNumber)
             // Different video IDs can represent one recording; serialize the lookup with its save.
             albumLock.withLock {
                 songs.backfillNormalizedTitles()

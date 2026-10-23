@@ -103,6 +103,21 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
+    fun migrate17To18KeepsQueuedJobsWithoutAlbumMetadata() {
+        helper.createDatabase(DB_NAME, 17).use { db ->
+            db.execSQL("INSERT INTO download_jobs VALUES ('old', 'Title', 'Artist', NULL, 1000, 'QUEUED', 1, 10, 20, NULL, '/dest')")
+        }
+        helper.runMigrationsAndValidate(DB_NAME, 18, true, AppDatabase.MIGRATION_17_18).use { db ->
+            db.query("SELECT status, album, trackNumber FROM download_jobs WHERE videoId = 'old'").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("QUEUED", cursor.getString(0))
+                assertTrue(cursor.isNull(1))
+                assertTrue(cursor.isNull(2))
+            }
+        }
+    }
+
+    @Test
     fun discardQueuedCannotRemoveLiveOrCompletedJobs() = kotlinx.coroutines.runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val db = androidx.room.Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()

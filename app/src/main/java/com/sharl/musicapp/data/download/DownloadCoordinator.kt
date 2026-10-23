@@ -101,13 +101,18 @@ class DownloadCoordinator(
         return targetDir().canonicalFile.takeIf { it in roots }
     }
 
-    suspend fun enqueue(request: DownloadRequest) {
+    suspend fun enqueue(
+        request: DownloadRequest,
+        album: String? = null,
+        trackNumber: Int? = null
+    ) {
         require(validVideoId(request.videoId)) { "Invalid download identifier" }
         if (store.get(request.videoId) != null) return
         val dir = resolveDestination(null) ?: throw IOException("Download storage unavailable")
         val now = clock()
         store.save(DownloadJob(request.videoId, request.title, request.artist, request.thumbnailUrl,
-            request.durationMs, DownloadJob.Status.QUEUED, 0, now, now, destinationDir = dir.path))
+            request.durationMs, DownloadJob.Status.QUEUED, 0, now, now, destinationDir = dir.path,
+            album = album, trackNumber = trackNumber))
     }
 
     suspend fun run(request: DownloadRequest, onProgress: (Int) -> Unit = {}): DownloadResult {

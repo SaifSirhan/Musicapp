@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -365,5 +366,34 @@ class DownloadCoordinatorTest {
         assertEquals(1, coordinator.recoverInterrupted())
         assertEquals(DownloadJob.Status.QUEUED, store.jobs.getValue("vid").status)
         assertEquals(0, coordinator.recoverInterrupted())
+    }
+
+    @Test
+    fun retryNeverResumesPartialBytesFromAKilledAttempt() = runBlocking {
+        val store = FakeStore()
+        val staging = ArrayList<File>()
+        var calls = 0
+        val engine = object : DownloadEngine {
+            override suspend fun download(request: DownloadRequest, targetDir: File, onProgress: (Int) -> Unit): File {
+                calls++
+                staging += targetDir
+                val partial = File(targetDir, "${request.videoId}.m4a.part")
+                if (calls == 1) {
+                    // A killed writer abandons its partial bytes here, unmarked and unreclaimable.
+                    partial.writeBytes(ByteArray(8) { 1 })
+                    throw IOException("writer lost")
+                }
+                assertFalse("retry resumed the previous partial", partial.exists())
+                partial.writeBytes(ByteArray(16) { 2 })
+                return partial
+            }
+        }
+
+        assertTrue(coordinator(store, engine).run(request) is DownloadResult.Failed)
+        assertTrue(coordinator(store, engine).run(request) is DownloadResult.Published)
+        assertEquals(2, staging.size)
+        assertNotEquals(staging[0], staging[1])
+        assertEquals(8L, File(staging[0], "vid.m4a.part").length())
+        assertEquals(16L, File(temp.root, "vid.m4a").length())
     }
 }

@@ -6,8 +6,10 @@ import com.sharl.musicapp.data.DownloadJob
 import com.sharl.musicapp.data.DownloadRepository
 import com.sharl.musicapp.data.SettingsRepo
 import com.sharl.musicapp.data.download.DownloadCoordinator
+import com.sharl.musicapp.data.download.DownloadQueueDrainer
 import com.sharl.musicapp.data.download.DownloadRequest
 import com.sharl.musicapp.data.download.DownloadResult
+import com.sharl.musicapp.data.download.DrainVerdict
 import com.sharl.musicapp.data.download.RoomDownloadJobStore
 import com.sharl.musicapp.data.download.YtdlpDownloadEngine
 import kotlinx.coroutines.CancellationException
@@ -63,10 +65,15 @@ object Downloader {
         } == true
 
     /** Persist acceptance before any in-process transfer/album lock. Existing metadata is immutable. */
-    suspend fun enqueue(context: Context, settings: SettingsRepo, request: DownloadRequest): Unit =
-        withContext(Dispatchers.IO) {
-            coordinator(context.applicationContext, settings).enqueue(request)
-        }
+    suspend fun enqueue(
+        context: Context,
+        settings: SettingsRepo,
+        request: DownloadRequest,
+        album: String? = null,
+        trackNumber: Int? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        coordinator(context.applicationContext, settings).enqueue(request, album, trackNumber)
+    }
 
     private fun coordinator(context: Context, settings: SettingsRepo): DownloadCoordinator =
         DownloadCoordinator(
@@ -106,7 +113,8 @@ object Downloader {
         )
         repo(context).upsert(row)
         com.sharl.musicapp.data.SongRepository(context).saveDownloadedSong(
-            row.videoId, row.title, row.artist, null, row.thumbnailUrl, durationMs = row.durationMs
+            row.videoId, row.title, row.artist, accepted?.album, row.thumbnailUrl,
+            trackNumber = accepted?.trackNumber, durationMs = row.durationMs
         )
         store.delete(videoId)
         return row
@@ -151,37 +159,6 @@ object Downloader {
             is DownloadResult.Failed -> {
                 setState(videoId, DownloadState.Failed(result.message))
                 null
-            }
-        }
-    }
-
-    // Phase 43: Simple download for search results (uses defaults for missing metadata)
-    // Phase 50: durable job, storage check, atomic publication.
-    suspend fun downloadSimple(
-        context: Context,
-        settings: SettingsRepo,
-        videoId: String,
-        title: String,
-        artist: String,
-        thumb: String?
-    ): File? = withContext(Dispatchers.IO) {
-        val appContext = context.applicationContext
-        val request = DownloadRequest(videoId, title, artist, thumb)
-        enqueue(appContext, settings, request)
-        mutex.withLock {
-            setState(videoId, DownloadState.Queued)
-            val store = RoomDownloadJobStore(appContext)
-            val result = try {
-                coordinator(appContext, settings).run(request, progress(videoId))
-            } catch (e: CancellationException) {
-                setState(videoId, DownloadState.Queued)
-                throw e
-            } catch (e: Exception) {
-                setState(videoId, DownloadState.Failed("Download could not be completed"))
-                return@withLock null
-            }
-            handleResult(appContext, store, videoId, title, artist, thumb, 0L, result)?.let {
-                File(it.filePath)
             }
         }
     }
@@ -255,25 +232,30 @@ object Downloader {
             }
         }
 
-    /** Explicitly retries queued and storage-blocked jobs; stops the entire drain on low space. */
-    suspend fun resumePending(context: Context, settings: SettingsRepo) =
-        withContext(Dispatchers.IO) {
-            val appContext = context.applicationContext
-            val store = RoomDownloadJobStore(appContext)
-            coordinator(appContext, settings).recoverInterrupted()
-            val albumDownloads = com.sharl.musicapp.data.AlbumDownloadRepository(appContext)
-            for (job in store.resumable()) {
-                val request = DownloadRequest(job.videoId, job.title, job.artist, job.thumbnailUrl, job.durationMs)
+    /** Explicit queue drain, owned by a worker that outlives any single screen. */
+    fun queueDrainer(context: Context, settings: SettingsRepo): DownloadQueueDrainer {
+        val appContext = context.applicationContext
+        val albumDownloads = com.sharl.musicapp.data.AlbumDownloadRepository(appContext)
+        return DownloadQueueDrainer(
+            store = RoomDownloadJobStore(appContext),
+            recover = { coordinator(appContext, settings).recoverInterrupted() },
+            transfer = { job ->
+                val request = DownloadRequest(
+                    job.videoId, job.title, job.artist, job.thumbnailUrl, job.durationMs
+                )
                 try {
-                    albumDownloads.downloadTrack(request, null, null)
+                    albumDownloads.downloadTrack(request, job.album, job.trackNumber)
+                    DrainVerdict.PROCEEDED
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) {
-                    if (stateOf(job.videoId) is DownloadState.WaitingForSpace ||
-                        stateOf(job.videoId) is DownloadState.Queued) return@withContext
+                    // Low storage blocks every remaining row; a failed row never blocks the queue.
+                    if (stateOf(job.videoId) is DownloadState.WaitingForSpace) DrainVerdict.BLOCKED
+                    else DrainVerdict.PROCEEDED
                 }
             }
-        }
+        )
+    }
 
     suspend fun remove(context: Context, download: Download) = withContext(Dispatchers.IO) {
         mutex.withLock {

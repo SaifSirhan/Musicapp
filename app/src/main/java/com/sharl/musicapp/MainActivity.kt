@@ -209,7 +209,7 @@ fun PlayerScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val repo = remember { SongRepository(context) }
-    val albumDownloads = remember { com.sharl.musicapp.data.AlbumDownloadRepository(context.applicationContext) }
+
     val recent by repo.recentlyPlayed().collectAsState(initial = emptyList())
     val favorites by repo.favorites().collectAsState(initial = emptyList())
     val forYouRecent by repo.recentSongs(10).collectAsState(initial = emptyList())
@@ -279,14 +279,14 @@ fun PlayerScreen(
     val settings = remember { SettingsRepo(context) }
 
     LaunchedEffect(Unit) {
-        // Phase 50: rows written before normalization existed get a title key
-        // and a duration (from downloads) without blocking the UI.
+        // Durable queue work belongs to the foreground service, not to this composition:
+        // starting it here also resumes whatever a kill or reboot left queued.
+        DownloadService.start(context)
         withContext(Dispatchers.IO) {
             repo.backfillNormalizedTitles()
             try {
                 LibraryReconciler.forContext(context).reconcile()
                 Downloader.recoverCompleted(context, settings)
-                Downloader.resumePending(context, settings)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -487,7 +487,13 @@ fun PlayerScreen(
     ) {
         scope.launch {
             try {
-                Downloader.download(context, settings, videoId, title, artist, thumb, durationMs)
+                Downloader.enqueue(
+                    context, settings,
+                    com.sharl.musicapp.data.download.DownloadRequest(videoId, title, artist, thumb, durationMs)
+                )
+                DownloadService.start(context)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 status = "Download failed: ${e.message}"
             }
@@ -499,8 +505,7 @@ fun PlayerScreen(
         if (artist.isBlank()) return
         scope.launch {
             status = "Looking up $artist's albums..."
-            var downloaded = 0
-            var failed = 0
+            var queued = 0
             try {
                 val albums = YtdlpHelper.searchAlbums(context, artist, limit = 8)
                 if (albums.isEmpty()) {
@@ -508,39 +513,36 @@ fun PlayerScreen(
                     return@launch
                 }
                 albums.forEachIndexed { albumIdx, album ->
-                    status = "Discography ${albumIdx + 1}/${albums.size}: ${album.title}"
+                    status = "Queuing ${albumIdx + 1}/${albums.size}: ${album.title}"
                     val tracks = YtdlpHelper.searchAlbumTracks(
                         context, artist,
                         album.videoId.takeIf { com.sharl.musicapp.data.album.AlbumInput.isId(it) } ?: album.title,
                         limit = 100
                     )
-                    tracks.forEach { track ->
-                        Downloader.enqueue(context, settings, com.sharl.musicapp.data.download.DownloadRequest(
-                            track.videoId, track.title, track.channel.orEmpty(), youtubeThumb(track.videoId), track.durationMs ?: 0L
-                        ))
-                    }
-                    tracks.forEachIndexed { trackIdx, t ->
+                    tracks.forEachIndexed { trackIdx, track ->
                         try {
-                            val row = albumDownloads.downloadTrack(
+                            Downloader.enqueue(
+                                context, settings,
                                 com.sharl.musicapp.data.download.DownloadRequest(
-                                    t.videoId, t.title, t.channel.orEmpty(), youtubeThumb(t.videoId), t.durationMs ?: 0L
-                                ), album.title, trackIdx + 1
+                                    track.videoId, track.title, track.channel.orEmpty(),
+                                    youtubeThumb(track.videoId), track.durationMs ?: 0L
+                                ),
+                                album.title, trackIdx + 1
                             )
-                            if (row.videoId == t.videoId) downloaded++
+                            queued++
                         } catch (e: kotlinx.coroutines.CancellationException) {
                             throw e
                         } catch (e: Exception) {
-                            failed++
-                            if (Downloader.stateOf(t.videoId) is DownloadState.WaitingForSpace) {
-                                status = "Downloads paused: free storage and retry"
-                                return@launch
-                            }
-                            Log.w("DISC", "Album track download failed")
+                            Log.w("DISC", "Album track could not be queued")
                         }
                     }
                 }
-                status = "Discography done: $downloaded downloaded" +
-                    if (failed > 0) ", $failed failed" else ""
+                if (queued == 0) {
+                    status = "No downloadable tracks for $artist"
+                    return@launch
+                }
+                DownloadService.start(context)
+                status = "Downloading $queued tracks for $artist"
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1000,12 +1002,14 @@ fun PlayerScreen(
                     loadingVideoId = videoId
                     scope.launch {
                         try {
-                            val row = albumDownloads.downloadTrack(
+                            Downloader.enqueue(
+                                context, settings,
                                 com.sharl.musicapp.data.download.DownloadRequest(
                                     videoId, title, artist, youtubeThumb(videoId), durationMs
                                 ), album, trackNumber
                             )
-                            status = if (row.videoId == videoId) "Downloaded: $title" else "Already downloaded: $title"
+                            DownloadService.start(context)
+                            status = "Queued: $title"
                         } catch (e: kotlinx.coroutines.CancellationException) {
                             throw e
                         } catch (e: Exception) {
@@ -1529,17 +1533,20 @@ fun PlayerScreen(
                     onToggleFavorite = { song -> scope.launch { repo.toggleFavorite(song) } },
                     onSongMenu = { menuSong = it },
                     onDownload = { videoId, title, artist ->
-                        // Phase 43: Trigger permanent download to library
-                        status = "Downloading to Library..."
-                        loadingVideoId = videoId
+                        status = "Queued: $title"
                         scope.launch {
                             try {
-                                Downloader.downloadSimple(context, settings, videoId, title, artist, youtubeThumb(videoId))
-                                status = "Downloaded: $title"
+                                Downloader.enqueue(
+                                    context, settings,
+                                    com.sharl.musicapp.data.download.DownloadRequest(
+                                        videoId, title, artist, youtubeThumb(videoId)
+                                    )
+                                )
+                                DownloadService.start(context)
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
                             } catch (e: Exception) {
                                 status = "Download failed: ${e.message}"
-                            } finally {
-                                if (loadingVideoId == videoId) loadingVideoId = null
                             }
                         }
                     },
@@ -2196,17 +2203,27 @@ fun PlayerScreen(
                         scope.launch {
                             try {
                                 val songs = playlistRepo.songs(pid).first()
+                                var queued = 0
                                 songs.filterNot { downloadIds.contains(it.videoId) }
                                     .forEach { ps ->
                                         try {
-                                            Downloader.download(
-                                                context, settings, ps.videoId, ps.title,
-                                                ps.artist, ps.thumbnailUrl, 0L
+                                            Downloader.enqueue(
+                                                context, settings,
+                                                com.sharl.musicapp.data.download.DownloadRequest(
+                                                    ps.videoId, ps.title, ps.artist, ps.thumbnailUrl, 0L
+                                                )
                                             )
+                                            queued++
+                                        } catch (e: kotlinx.coroutines.CancellationException) {
+                                            throw e
                                         } catch (e: Exception) {
-                                            Log.w("DOWNLOAD", "playlist download failed ${ps.videoId}", e)
+                                            Log.w("DOWNLOAD", "playlist download could not be queued ${ps.videoId}", e)
                                         }
                                     }
+                                if (queued > 0) {
+                                    DownloadService.start(context)
+                                    status = "Downloading $queued songs"
+                                }
                             } catch (e: Exception) {
                                 status = "Download all failed: ${e.message}"
                             }

@@ -20,7 +20,9 @@ data class DownloadJob(
     val requestedAt: Long,
     val updatedAt: Long,
     val lastError: String? = null,
-    val destinationDir: String? = null
+    val destinationDir: String? = null,
+    val album: String? = null,
+    val trackNumber: Int? = null
 ) {
     object Status {
         const val QUEUED = "QUEUED"
