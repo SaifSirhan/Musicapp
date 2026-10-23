@@ -1,13 +1,16 @@
 package com.sharl.musicapp
 
 import android.content.Context
-import android.util.Log
 import com.sharl.musicapp.data.Download
+import com.sharl.musicapp.data.DownloadJob
 import com.sharl.musicapp.data.DownloadRepository
 import com.sharl.musicapp.data.SettingsRepo
-import com.yausername.youtubedl_android.YoutubeDL
-import com.yausername.youtubedl_android.YoutubeDL.UpdateChannel
-import com.yausername.youtubedl_android.YoutubeDLRequest
+import com.sharl.musicapp.data.download.DownloadCoordinator
+import com.sharl.musicapp.data.download.DownloadRequest
+import com.sharl.musicapp.data.download.DownloadResult
+import com.sharl.musicapp.data.download.RoomDownloadJobStore
+import com.sharl.musicapp.data.download.YtdlpDownloadEngine
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,12 +19,14 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 
 sealed class DownloadState {
     object Idle : DownloadState()
     object Queued : DownloadState()
     data class Downloading(val percent: Int) : DownloadState()
     data class Done(val file: File) : DownloadState()
+    data class WaitingForSpace(val availableBytes: Long, val requiredBytes: Long) : DownloadState()
     data class Failed(val msg: String) : DownloadState()
 }
 
@@ -29,26 +34,8 @@ object Downloader {
 
     private val mutex = Mutex()
 
-    @Volatile
-    private var initialized = false
-
     private val _states = MutableStateFlow<Map<String, DownloadState>>(emptyMap())
     val states: StateFlow<Map<String, DownloadState>> = _states
-
-    private fun ensureInitialized(context: Context) {
-        if (initialized) return
-        synchronized(this) {
-            if (initialized) return
-            YoutubeDL.getInstance().init(context.applicationContext)
-            try {
-                YoutubeDL.getInstance().updateYoutubeDL(context, UpdateChannel.NIGHTLY)
-                Log.d("DOWNLOAD", "yt-dlp updated successfully")
-            } catch (e: Exception) {
-                Log.e("DOWNLOAD", "yt-dlp update failed", e)
-            }
-            initialized = true
-        }
-    }
 
     private fun repo(context: Context) = DownloadRepository(context.applicationContext)
 
@@ -60,8 +47,116 @@ object Downloader {
 
     fun stateOf(videoId: String): DownloadState = _states.value[videoId] ?: DownloadState.Idle
 
+    private fun audioRoot(context: Context, settings: SettingsRepo): File {
+        val base = if (settings.storageExternal) context.getExternalFilesDir(null) else context.filesDir
+        return DownloadCoordinator.child(base ?: throw IOException("Download storage unavailable"), "downloads")
+            .apply { mkdirs() }
+    }
+
+    private fun authorizedRoots(context: Context): List<File> =
+        listOfNotNull(context.filesDir, context.getExternalFilesDir(null))
+            .map { DownloadCoordinator.child(it, "downloads") }
+
+    private fun allRootsAvailable(context: Context): Boolean =
+        context.getExternalFilesDir(null)?.let {
+            android.os.Environment.getExternalStorageState(it) == android.os.Environment.MEDIA_MOUNTED
+        } == true
+
+    /** Persist acceptance before any in-process transfer/album lock. Existing metadata is immutable. */
+    suspend fun enqueue(context: Context, settings: SettingsRepo, request: DownloadRequest): Unit =
+        withContext(Dispatchers.IO) {
+            coordinator(context.applicationContext, settings).enqueue(request)
+        }
+
+    private fun coordinator(context: Context, settings: SettingsRepo): DownloadCoordinator =
+        DownloadCoordinator(
+            store = RoomDownloadJobStore(context.applicationContext),
+            engine = YtdlpDownloadEngine(context.applicationContext),
+            targetDir = { audioRoot(context.applicationContext, settings) },
+            availableBytes = { DownloadCoordinator.availableSpace(context.applicationContext, it) },
+            lockDir = { DownloadCoordinator.child(context.applicationContext.filesDir, "downloads") },
+            authorizedRoots = { authorizedRoots(context.applicationContext) },
+            rootsAvailable = { allRootsAvailable(context.applicationContext) }
+        )
+
+    private fun progress(videoId: String): (Int) -> Unit = { percent ->
+        setState(videoId, DownloadState.Downloading(percent))
+    }
+
+    private suspend fun linkToLibrary(
+        context: Context,
+        store: RoomDownloadJobStore,
+        videoId: String,
+        file: File,
+        title: String,
+        artist: String,
+        thumb: String?,
+        durationMs: Long
+    ): Download {
+        val accepted = store.get(videoId)
+        val row = Download(
+            videoId = videoId,
+            filePath = file.absolutePath,
+            fileSizeBytes = file.length(),
+            downloadedAt = System.currentTimeMillis(),
+            title = accepted?.title ?: title,
+            artist = accepted?.artist ?: artist,
+            thumbnailUrl = if (accepted != null) accepted.thumbnailUrl else thumb,
+            durationMs = accepted?.durationMs ?: durationMs
+        )
+        repo(context).upsert(row)
+        com.sharl.musicapp.data.SongRepository(context).saveDownloadedSong(
+            row.videoId, row.title, row.artist, null, row.thumbnailUrl, durationMs = row.durationMs
+        )
+        store.delete(videoId)
+        return row
+    }
+
+    private suspend fun handleResult(
+        context: Context,
+        store: RoomDownloadJobStore,
+        videoId: String,
+        title: String,
+        artist: String,
+        thumb: String?,
+        durationMs: Long,
+        result: DownloadResult
+    ): Download? {
+        return when (result) {
+            DownloadResult.Busy -> {
+                setState(videoId, DownloadState.Queued)
+                null
+            }
+            is DownloadResult.Published -> {
+                val row = linkToLibrary(
+                    context, store, videoId, result.file, title, artist, thumb, durationMs
+                )
+                setState(videoId, DownloadState.Done(result.file))
+                row
+            }
+            is DownloadResult.AlreadyPresent -> {
+                val row = linkToLibrary(
+                    context, store, videoId, result.file, title, artist, thumb, durationMs
+                )
+                setState(videoId, DownloadState.Done(result.file))
+                row
+            }
+            is DownloadResult.WaitingForSpace -> {
+                setState(
+                    videoId,
+                    DownloadState.WaitingForSpace(result.availableBytes, result.requiredBytes)
+                )
+                null
+            }
+            is DownloadResult.Failed -> {
+                setState(videoId, DownloadState.Failed(result.message))
+                null
+            }
+        }
+    }
+
     // Phase 43: Simple download for search results (uses defaults for missing metadata)
-    // Phase 44b: Simple download with .part temp files for search results
+    // Phase 50: durable job, storage check, atomic publication.
     suspend fun downloadSimple(
         context: Context,
         settings: SettingsRepo,
@@ -71,94 +166,27 @@ object Downloader {
         thumb: String?
     ): File? = withContext(Dispatchers.IO) {
         val appContext = context.applicationContext
+        val request = DownloadRequest(videoId, title, artist, thumb)
+        enqueue(appContext, settings, request)
         mutex.withLock {
             setState(videoId, DownloadState.Queued)
-            var partFile: File? = null
-            try {
-                ensureInitialized(appContext)
-                val dir = settings.downloadDir(appContext)
-                // Phase 44b: Download to .part file first
-                val partPath = File(dir, "$videoId.m4a.part").absolutePath
-                val finalPath = File(dir, "$videoId.m4a").absolutePath
-
-                val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId").apply {
-                    addOption("--no-playlist")
-                    addOption("--newline")
-                    addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
-                    addOption("-o", partPath)
-                    addOption("--print", "after_move:filepath")
-                    addOption("--extractor-args",
-                        "youtube:player_client=ios,tv,mweb,android_vr,web_embedded,tv_embedded")
-                    addOption("--remote-components", "ejs:github")
-                    addOption("--no-update")
-                    addOption("--no-warnings")
-                }
-
-                val response = YoutubeDL.getInstance().execute(
-                    request,
-                    processId = null,
-                    callback = { progress, _, _ ->
-                        if (progress >= 0f) {
-                            setState(videoId, DownloadState.Downloading(progress.toInt()))
-                        }
-                    }
-                )
-
-                val path = response.out.lineSequence()
-                    .map { it.trim() }
-                    .filter { it.isNotEmpty() }
-                    .lastOrNull()
-
-                partFile = path?.let { File(it) }?.takeIf { it.exists() && it.length() > 0L }
-                if (partFile == null) {
-                    Log.e("DOWNLOAD", "downloadSimple produced no file for $videoId")
-                    setState(videoId, DownloadState.Failed("No file created"))
-                    partFile?.delete()
-                    return@withLock null
-                }
-
-                // Phase 44b: Verify and rename from .part to final
-                if (!partFile!!.exists() || partFile!!.length() == 0L) {
-                    partFile!!.delete()
-                    setState(videoId, DownloadState.Failed("Empty file"))
-                    return@withLock null
-                }
-
-                val finalFile = File(finalPath)
-                if (partFile!!.renameTo(finalFile)) {
-                    Log.d("DOWNLOAD", "Renamed ${partFile!!.name} to ${finalFile.name}")
-                } else {
-                    partFile!!.copyTo(finalFile, overwrite = true)
-                    partFile!!.delete()
-                }
-
-                // Add to downloads database
-                val download = Download(
-                    videoId = videoId,
-                    filePath = finalFile.absolutePath,
-                    fileSizeBytes = finalFile.length(),
-                    downloadedAt = System.currentTimeMillis(),
-                    title = title,
-                    artist = artist,
-                    thumbnailUrl = thumb,
-                    durationMs = 0L
-                )
-                repo(appContext).upsert(download)
-                
-                setState(videoId, DownloadState.Done(finalFile))
-                Log.d("DOWNLOAD", "downloadSimple success: $videoId -> ${finalFile.absolutePath}")
-                finalFile
+            val store = RoomDownloadJobStore(appContext)
+            val result = try {
+                coordinator(appContext, settings).run(request, progress(videoId))
+            } catch (e: CancellationException) {
+                setState(videoId, DownloadState.Queued)
+                throw e
             } catch (e: Exception) {
-                Log.e("DOWNLOAD", "downloadSimple failed for $videoId: ${e.message}", e)
-                // Phase 44b: Clean up .part file on failure
-                partFile?.takeIf { it.exists() }?.delete()
-                setState(videoId, DownloadState.Failed(e.message ?: "Unknown error"))
-                null
+                setState(videoId, DownloadState.Failed("Download could not be completed"))
+                return@withLock null
+            }
+            handleResult(appContext, store, videoId, title, artist, thumb, 0L, result)?.let {
+                File(it.filePath)
             }
         }
     }
 
-    // Phase 44b: Safe download with .part temp files to prevent corruption
+    // Phase 50: durable, storage-aware download with atomic publication.
     suspend fun download(
         context: Context,
         settings: SettingsRepo,
@@ -169,102 +197,98 @@ object Downloader {
         durationMs: Long
     ): Download = withContext(Dispatchers.IO) {
         val appContext = context.applicationContext
+        val request = DownloadRequest(videoId, title, artist, thumb, durationMs)
+        enqueue(appContext, settings, request)
         mutex.withLock {
             setState(videoId, DownloadState.Queued)
-            var partFile: File? = null
-            try {
-                ensureInitialized(appContext)
-                val dir = settings.downloadDir(appContext)
-                // Phase 44b: Download to .part file first
-                val partPath = File(dir, "$videoId.m4a.part").absolutePath
-                val finalPath = File(dir, "$videoId.m4a").absolutePath
-                
-                val request = YoutubeDLRequest("https://www.youtube.com/watch?v=$videoId").apply {
-                    addOption("--no-playlist")
-                    addOption("--newline")
-                    addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
-                    addOption("-o", partPath)
-                    addOption("--print", "after_move:filepath")
-                    addOption("--extractor-args",
-                        "youtube:player_client=ios,tv,mweb,android_vr,web_embedded,tv_embedded")
-                    addOption("--remote-components", "ejs:github")
-                    addOption("--no-update")
-                    addOption("--no-warnings")
-                }
-
-                val response = YoutubeDL.getInstance().execute(
-                    request,
-                    processId = null,
-                    callback = { progress, _, _ ->
-                        if (progress >= 0f) {
-                            setState(videoId, DownloadState.Downloading(progress.toInt()))
-                        }
-                    }
-                )
-
-                val path = response.out
-                    .lineSequence()
-                    .map { it.trim() }
-                    .filter { it.isNotEmpty() }
-                    .lastOrNull()
-                
-                partFile = path?.let { File(it) }?.takeIf { it.exists() && it.length() > 0L }
-                if (partFile == null) {
-                    setState(videoId, DownloadState.Failed("download produced no file"))
-                    partFile?.delete()
-                    throw IllegalStateException("download produced no file")
-                }
-
-                // Phase 44b: Verify file integrity, then rename from .part to final
-                if (!partFile!!.exists() || partFile!!.length() == 0L) {
-                    partFile!!.delete()
-                    setState(videoId, DownloadState.Failed("Empty file"))
-                    throw IllegalStateException("Download failed: empty file")
-                }
-
-                // Rename .part to final path
-                val finalFile = File(finalPath)
-                if (partFile!!.renameTo(finalFile)) {
-                    Log.d("DOWNLOAD", "Renamed ${partFile!!.name} to ${finalFile.name}")
-                } else {
-                    // Fallback: copy and delete
-                    partFile!!.copyTo(finalFile, overwrite = true)
-                    partFile!!.delete()
-                    Log.w("DOWNLOAD", "Rename failed, copied instead for $videoId")
-                }
-
-                val row = Download(
-                    videoId = videoId,
-                    filePath = finalFile.absolutePath,
-                    fileSizeBytes = finalFile.length(),
-                    downloadedAt = System.currentTimeMillis(),
-                    title = title,
-                    artist = artist,
-                    thumbnailUrl = thumb,
-                    durationMs = durationMs
-                )
-                repo(appContext).upsert(row)
-                setState(videoId, DownloadState.Done(finalFile))
-                Log.d("DOWNLOAD", "downloaded $videoId -> ${finalFile.absolutePath}")
-                row
-            } catch (e: Exception) {
-                Log.e("DOWNLOAD", "download failed for $videoId: ${e.message}", e)
-                // Phase 44b: Clean up .part file on failure
-                partFile?.takeIf { it.exists() }?.delete()
-                setState(videoId, DownloadState.Failed(e.message ?: "unknown error"))
+            val store = RoomDownloadJobStore(appContext)
+            val result = try {
+                coordinator(appContext, settings).run(request, progress(videoId))
+            } catch (e: CancellationException) {
+                setState(videoId, DownloadState.Queued)
                 throw e
+            } catch (e: Exception) {
+                setState(videoId, DownloadState.Failed("Download could not be completed"))
+                throw IOException("Download could not be completed")
             }
+            if (result is DownloadResult.WaitingForSpace) {
+                setState(
+                    videoId,
+                    DownloadState.WaitingForSpace(result.availableBytes, result.requiredBytes)
+                )
+                throw IOException("Not enough storage to download $videoId")
+            }
+            handleResult(appContext, store, videoId, title, artist, thumb, durationMs, result)
+                ?: throw IllegalStateException("Download failed for $videoId")
         }
     }
 
-    suspend fun remove(context: Context, download: Download) = withContext(Dispatchers.IO) {
-        try {
-            File(download.filePath).delete()
-        } catch (e: Exception) {
-            Log.w("DOWNLOAD", "could not delete ${download.filePath}", e)
+    /** Re-links downloads published just before process death. Idempotent. */
+    suspend fun recoverCompleted(context: Context, settings: SettingsRepo) =
+        withContext(Dispatchers.IO) {
+            val appContext = context.applicationContext
+            val store = RoomDownloadJobStore(appContext)
+            val roots = authorizedRoots(appContext)
+            for (job in store.completed()) {
+                if (!DownloadCoordinator.validVideoId(job.videoId)) continue
+                val candidates = roots.filter { job.destinationDir == null || it.path == job.destinationDir }
+                val file = candidates.mapNotNull { dir ->
+                    try { DownloadCoordinator.child(dir, "${job.videoId}.m4a") }
+                    catch (_: IllegalArgumentException) { null }
+                }.firstOrNull { it.isFile && it.length() > 0L }
+                if (file != null) {
+                    linkToLibrary(
+                        appContext, store, job.videoId, file,
+                        job.title, job.artist, job.thumbnailUrl, job.durationMs
+                    )
+                } else {
+                    // Missing/unmounted external storage is not evidence that audio was lost.
+                    if (candidates.isEmpty() || !allRootsAvailable(appContext)) continue
+                    store.setStatus(
+                        job.videoId,
+                        DownloadJob.Status.FAILED,
+                        job.attempts,
+                        System.currentTimeMillis(),
+                        "Published file missing"
+                    )
+                }
+            }
         }
-        repo(context.applicationContext).delete(download.videoId)
-        setState(download.videoId, null)
+
+    /** Explicitly retries queued and storage-blocked jobs; stops the entire drain on low space. */
+    suspend fun resumePending(context: Context, settings: SettingsRepo) =
+        withContext(Dispatchers.IO) {
+            val appContext = context.applicationContext
+            val store = RoomDownloadJobStore(appContext)
+            coordinator(appContext, settings).recoverInterrupted()
+            val albumDownloads = com.sharl.musicapp.data.AlbumDownloadRepository(appContext)
+            for (job in store.resumable()) {
+                val request = DownloadRequest(job.videoId, job.title, job.artist, job.thumbnailUrl, job.durationMs)
+                try {
+                    albumDownloads.downloadTrack(request, null, null)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    if (stateOf(job.videoId) is DownloadState.WaitingForSpace ||
+                        stateOf(job.videoId) is DownloadState.Queued) return@withContext
+                }
+            }
+        }
+
+    suspend fun remove(context: Context, download: Download) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            require(DownloadCoordinator.validVideoId(download.videoId)) { "Invalid download identifier" }
+            val roots = listOfNotNull(context.filesDir, context.getExternalFilesDir(null))
+                .map { DownloadCoordinator.child(it, "downloads") }
+            val file = File(download.filePath).canonicalFile
+            require(roots.any { root ->
+                file == DownloadCoordinator.child(root, "${download.videoId}.m4a")
+            }) { "File is outside the audio directory" }
+            if (file.exists() && !file.delete()) throw IOException("Could not remove download")
+            repo(context.applicationContext).delete(download.videoId)
+            com.sharl.musicapp.data.PlaybackCache.remove(download.videoId)
+            setState(download.videoId, null)
+        }
     }
 
     // Phase 43: All downloads go to permanent library folder. No separate cache.

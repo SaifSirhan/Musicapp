@@ -61,6 +61,8 @@ fun SongActionsSheet(
                 downloadState is DownloadState.Downloading ->
                     MenuItem("Downloading… ${downloadState.percent}%") {}
                 downloadState is DownloadState.Queued -> MenuItem("Queued…") {}
+                downloadState is DownloadState.WaitingForSpace ->
+                    MenuItem("Waiting for storage") { onDownload() }
                 isDownloaded -> MenuItem("Remove download") { onRemoveDownload() }
                 downloadState is DownloadState.Failed -> MenuItem("Retry download") {
                     onDownload()
