@@ -78,6 +78,7 @@ import com.sharl.musicapp.data.DownloadRepository
 import com.sharl.musicapp.data.FollowRepository
 import com.sharl.musicapp.data.FriendsRepository
 import com.sharl.musicapp.data.ImportRepository
+import com.sharl.musicapp.data.LibraryReconciler
 import com.sharl.musicapp.data.LocalMedia
 import com.sharl.musicapp.data.LocalMediaRepository
 import com.sharl.musicapp.data.MixRepository
@@ -129,16 +130,6 @@ import com.sharl.musicapp.ui.util.formatRelative
 import com.sharl.musicapp.ui.util.youtubeThumb
 import kotlinx.coroutines.launch
 
-data class QueueItem(
-    val videoId: String,
-    val title: String,
-    val artist: String = "",
-    val localUri: String? = null,
-    val isVideo: Boolean = false
-)
-
-private fun isLocalUri(uri: String): Boolean =
-    uri.startsWith("content://") || uri.startsWith("file://")
 
 // The failing cause, not the recovery wrapper: ExoPlayer's HttpDataSource already
 // includes the CDN's HTTP status ("...502: Response code: 403").
@@ -218,6 +209,7 @@ fun PlayerScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val repo = remember { SongRepository(context) }
+    val albumDownloads = remember { com.sharl.musicapp.data.AlbumDownloadRepository(context.applicationContext) }
     val recent by repo.recentlyPlayed().collectAsState(initial = emptyList())
     val favorites by repo.favorites().collectAsState(initial = emptyList())
     val forYouRecent by repo.recentSongs(10).collectAsState(initial = emptyList())
@@ -244,26 +236,23 @@ fun PlayerScreen(
     var controller by remember { mutableStateOf<MediaController?>(null) }
     var connected by remember { mutableStateOf(false) }
 
-    var queue by remember { mutableStateOf<List<QueueItem>>(emptyList()) }
-    var queueIndex by remember { mutableStateOf(-1) }
-    // In-flight queue rebuild. A new play request cancels it so rapid skips
-    // can't race two setMediaItems calls against a stale queue index.
-    var playJob by remember { mutableStateOf<Job?>(null) }
-    // Generation counter for rapid taps: each play request bumps it, and only
-    // the latest generation may apply its resolved window to the controller.
-    var playGeneration by remember { mutableStateOf(0L) }
-    // Background warm-up of the following tracks into PlaybackCache; cancelled
-    // by the next play request so stale tracks stop competing for the resolver.
-    var prefetchJob by remember { mutableStateOf<Job?>(null) }
-    // Queue index that maps to player position 0 of the currently loaded
-    // MediaItem window. The player only ever holds a contiguous slice
-    // [windowStart .. windowStart + mediaItemCount - 1] of [queue].
-    var windowStart by remember { mutableStateOf(0) }
-    // One-shot streaming recovery. YouTube CDN URLs 403 once their signed range
-    // expires; on the first IO error per track we re-download it to the local
-    // playback cache and replay, instead of leaving the UI stuck at 0:00.
-    var recoveringVideoId by remember { mutableStateOf<String?>(null) }
-    val recoveryAttempts = remember { mutableSetOf<String>() }
+    val queueController = remember(controller) { controller?.let { QueueController(it) } }
+    val emptyQueue = remember { kotlinx.coroutines.flow.MutableStateFlow(emptyList<QueueItem>()) }
+    val emptyUid = remember { kotlinx.coroutines.flow.MutableStateFlow<String?>(null) }
+    val queue by (queueController?.queue ?: emptyQueue).collectAsState()
+    val currentUid by (queueController?.currentUid ?: emptyUid).collectAsState()
+    val queueIndex = queue.indexOfFirst { it.uid == currentUid }
+    DisposableEffect(queueController) {
+        onDispose { queueController?.close() }
+    }
+    LaunchedEffect(queueController) {
+        queueController?.errors?.collect { message ->
+            if (message != null) {
+                status = message
+                snackbarHostState.showSnackbar(message)
+            }
+        }
+    }
     var nowPlayingTitle by remember { mutableStateOf<String?>(null) }
     var nowPlayingArtist by remember { mutableStateOf<String?>(null) }
     var nowPlayingThumbnail by remember { mutableStateOf<String?>(null) }
@@ -284,13 +273,27 @@ fun PlayerScreen(
     var isVideoMode by remember { mutableStateOf(false) }
     var videoModeLoading by remember { mutableStateOf(false) }
 
-    val urlCache = remember { mutableStateMapOf<String, Pair<String, SongMetadata>>() }
     var loadingVideoId by remember { mutableStateOf<String?>(null) }
-    val extractMutex = remember { Mutex() }
     var innerTubeFailCount by remember { mutableStateOf(ResolutionStats.innerTubeFailCount(context)) }
     var fastEngine by remember { mutableStateOf(ResolutionStats.lastWasFast(context)) }
+    val settings = remember { SettingsRepo(context) }
 
-    LaunchedEffect(Unit) { PlaybackCache.init(context) }
+    LaunchedEffect(Unit) {
+        // Phase 50: rows written before normalization existed get a title key
+        // and a duration (from downloads) without blocking the UI.
+        withContext(Dispatchers.IO) {
+            repo.backfillNormalizedTitles()
+            try {
+                LibraryReconciler.forContext(context).reconcile()
+                Downloader.recoverCompleted(context, settings)
+                Downloader.resumePending(context, settings)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                Log.w("LIBRARY", "Library recovery could not be completed")
+            }
+        }
+    }
 
     val playlistRepo = remember { PlaylistRepository(context) }
     val playlists by playlistRepo.all().collectAsState(initial = emptyList())
@@ -326,7 +329,6 @@ fun PlayerScreen(
     val localMedia by localMediaRepo.all().collectAsState(initial = emptyList())
     var mediaPermissionGranted by remember { mutableStateOf(false) }
     val downloadStates by Downloader.states.collectAsState()
-    val settings = remember { SettingsRepo(context) }
     var storageExternalState by remember { mutableStateOf(settings.storageExternal) }
     var skipSecondsState by remember { mutableStateOf(settings.skipSeconds) }
     var playbackSpeedState by remember { mutableStateOf(settings.playbackSpeed) }
@@ -508,43 +510,42 @@ fun PlayerScreen(
                 albums.forEachIndexed { albumIdx, album ->
                     status = "Discography ${albumIdx + 1}/${albums.size}: ${album.title}"
                     val tracks = YtdlpHelper.searchAlbumTracks(
-                        context, artist, album.title, limit = 20
+                        context, artist,
+                        album.videoId.takeIf { com.sharl.musicapp.data.album.AlbumInput.isId(it) } ?: album.title,
+                        limit = 100
                     )
+                    tracks.forEach { track ->
+                        Downloader.enqueue(context, settings, com.sharl.musicapp.data.download.DownloadRequest(
+                            track.videoId, track.title, track.channel.orEmpty(), youtubeThumb(track.videoId), track.durationMs ?: 0L
+                        ))
+                    }
                     tracks.forEachIndexed { trackIdx, t ->
-                        if (t.videoId in downloadIds) return@forEachIndexed
                         try {
-                            val file = Downloader.downloadSimple(
-                                context,
-                                settings,
-                                t.videoId,
-                                t.title,
-                                artist,
-                                youtubeThumb(t.videoId)
+                            val row = albumDownloads.downloadTrack(
+                                com.sharl.musicapp.data.download.DownloadRequest(
+                                    t.videoId, t.title, t.channel.orEmpty(), youtubeThumb(t.videoId), t.durationMs ?: 0L
+                                ), album.title, trackIdx + 1
                             )
-                            if (file != null) {
-                                repo.saveDownloadedSong(
-                                    t.videoId,
-                                    t.title,
-                                    artist,
-                                    album.title,
-                                    youtubeThumb(t.videoId),
-                                    trackIdx + 1
-                                )
-                                downloaded++
-                            } else {
-                                failed++
-                            }
+                            if (row.videoId == t.videoId) downloaded++
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
                         } catch (e: Exception) {
                             failed++
-                            Log.w("DISC", "discography download failed for ${t.videoId}", e)
+                            if (Downloader.stateOf(t.videoId) is DownloadState.WaitingForSpace) {
+                                status = "Downloads paused: free storage and retry"
+                                return@launch
+                            }
+                            Log.w("DISC", "Album track download failed")
                         }
                     }
                 }
                 status = "Discography done: $downloaded downloaded" +
                     if (failed > 0) ", $failed failed" else ""
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
-                Log.e("DISC", "discography failed for $artist", e)
-                status = "Discography failed: ${e.message}"
+                Log.e("DISC", "Discography download failed")
+                status = "Discography download failed"
             }
         }
     }
@@ -685,297 +686,14 @@ fun PlayerScreen(
         }
     }
 
-    // Phase 43: All content is downloaded to permanent library. No cache.
-    suspend fun resolveRemote(
-        videoId: String,
-        fallbackTitle: String? = null,
-        immediateUse: Boolean = false
-    ): Pair<String, SongMetadata>? {
-        val started = System.currentTimeMillis()
-        
-        return withContext(Dispatchers.IO) {
-            try {
-                Log.d("RESOLVE", "Check library for $videoId")
-                
-                // Phase 42: Check connectivity before attempting download
-                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
-                val isConnected = cm?.activeNetworkInfo?.isConnected == true
-                
-                if (!isConnected) {
-                    // Check if file is in permanent library
-                    val download = downloadRepo.get(videoId)
-                    if (download != null) {
-                        val f = java.io.File(download.filePath)
-                        if (f.exists()) {
-                            Log.d("RESOLVE", "Offline mode - using library file for $videoId")
-                            val uri = android.net.Uri.fromFile(f).toString()
-                            return@withContext uri to SongMetadata(
-                                title = download.title,
-                                artist = download.artist,
-                                album = null,
-                                thumbnailUrl = download.thumbnailUrl
-                            )
-                        }
-                    }
-                    Log.w("RESOLVE", "Offline and not in library: $videoId")
-                    throw OfflineException("Song not downloaded")
-                }
-                
-                // Check if already in permanent library
-                val download = downloadRepo.get(videoId)
-                if (download != null) {
-                    val f = java.io.File(download.filePath)
-                    if (f.exists()) {
-                        val uri = android.net.Uri.fromFile(f).toString()
-                        val elapsed = System.currentTimeMillis() - started
-                        Log.d("RESOLVE", "Found in library for $videoId in ${elapsed}ms")
-                        return@withContext uri to SongMetadata(
-                            title = download.title,
-                            artist = download.artist,
-                            album = null,
-                            thumbnailUrl = download.thumbnailUrl
-                        )
-                    }
-                }
-                
-                // Not in library - caller must trigger download first
-                Log.w("RESOLVE", "Not in library: $videoId - download required")
-                return@withContext null
-            } catch (e: OfflineException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e("RESOLVE", "resolve failed for $videoId: ${e.message}", e)
-                return@withContext null
-            }
-        }
-    }
 
-    // Fire-and-forget background extraction into the cache. Never plays, never
-    // blocks UI, swallows errors. Serialized against user-initiated extraction
-    // via the shared mutex so only one yt-dlp process runs at a time.
-    suspend fun preExtract(videoId: String, title: String? = null) {
-        if (videoId.isBlank()) return
-        if (isLocalUri(videoId)) return
-        if (PlaybackCache.get(videoId) != null) return
-        if (downloadRepo.get(videoId)?.let { java.io.File(it.filePath).exists() } == true) return
-        extractMutex.withLock {
-            if (PlaybackCache.get(videoId) != null) return@withLock
-            try {
-                // The next track is prefetched moments before it plays, so any
-                // failure here is felt immediately: skip the slow clients now.
-                val pre = resolveRemote(videoId, title, immediateUse = true)
-                if (pre != null) {
-                    val (u, m) = pre
-                    PlaybackCache.put(videoId, u, m.title, m.artist, m.album, m.thumbnailUrl)
-                    urlCache[videoId] = pre
-                    Log.d("PRECACHE", "cached: $videoId")
-                }
-            } catch (e: Exception) {
-                Log.w("PRECACHE", "pre-extract failed for $videoId", e)
-            }
-        }
-    }
-
-    // Warm the top of the For You rows when they compose (one per screen).
-    androidx.compose.runtime.LaunchedEffect(
-        forYouRecent.firstOrNull()?.videoId,
-        forYouTop.firstOrNull()?.videoId
-    ) {
-        (forYouRecent.firstOrNull() ?: forYouTop.firstOrNull())?.let { preExtract(it.videoId, it.title) }
-    }
-
-    suspend fun extractOrCache(
-        videoId: String,
-        fallbackTitle: String? = null,
-        localUri: String? = null,
-        localArtist: String = "",
-        immediateUse: Boolean = false
-    ): Pair<String, SongMetadata> {
-        // Local Media Hub: the queue item already points at playable content.
-        if (localUri != null) {
-            return localUri to SongMetadata(
-                title = fallbackTitle ?: localUri,
-                artist = localArtist,
-                album = null,
-                thumbnailUrl = null
-            )
-        }
-        // Offline short-circuit: a downloaded song resolves to its local file,
-        // no network / no yt-dlp re-extraction.
-        downloadRepo.get(videoId)?.let { row ->
-            val f = java.io.File(row.filePath)
-            if (f.exists()) {
-                return android.net.Uri.fromFile(f).toString() to SongMetadata(
-                    title = row.title,
-                    artist = row.artist,
-                    album = null,
-                    thumbnailUrl = row.thumbnailUrl
-                )
-            }
-        }
-        // Phase 43: No separate cache. All files in permanent library.
-        // Check downloads database for local file.
-        
-        // 1. In-memory (this session) - only for already-resolved local files.
-        urlCache[videoId]?.let { pair ->
-            // Only use cached result if it's a local file, not a network URL
-            if (pair.first.startsWith("file://") || pair.first.startsWith("content://")) {
-                urlCache.remove(videoId)
-                return pair
-            }
-        }
-        // Phase 41: Bypass PlaybackCache for audio URLs. It stores stale stream
-        // URLs that cause Source Error 2004. Always download to local file first.
-        // PlaybackCache is kept for metadata only (title, artist, thumbnail).
-        
-        // 2. Cold extract — check library or trigger download; serialized so only one resolver runs at a time.
-        loadingVideoId = videoId
-        try {
-            val result = extractMutex.withLock {
-                resolveRemote(videoId, fallbackTitle, immediateUse)
-            } ?: throw StreamingBlockedException().also {
-                Log.e("RESOLVE", "Not in library: $videoId - download required")
-            }
-            val (u, m) = result
-            // Store metadata in PlaybackCache for UI display
-            PlaybackCache.put(videoId, u, m.title, m.artist, m.album, m.thumbnailUrl)
-            urlCache[videoId] = result
-            return result
-        } finally {
-            if (loadingVideoId == videoId) loadingVideoId = null
-        }
-    }
-
-    // --- Gapless playback helpers -------------------------------------------
-    // How many tracks ahead of the current one we try to keep resolved inside
-    // the ExoPlayer playlist so it can advance natively (no gap). Each start
-    // also warms this many tracks into PlaybackCache in the background.
-    val PRELOAD_AHEAD = 4
-
-    // Non-blocking cache lookup: in-session map first, then the persistent
-    // PlaybackCache. Returns null when a track isn't resolved yet, so callers
-    // skip it instead of triggering a cold (blocking) yt-dlp extraction.
-    fun cachedOnly(item: QueueItem): Pair<String, SongMetadata>? {
-        // Local files need no resolution and never expire, so the gapless
-        // window can always include them.
-        item.localUri?.let { uri ->
-            return uri to SongMetadata(
-                title = item.title,
-                artist = item.artist,
-                album = null,
-                thumbnailUrl = null
-            )
-        }
-        val videoId = item.videoId
-        // Downloaded files win over stream URLs: they never expire and need no
-        // network, so the gapless window can include them unconditionally.
-        downloads.firstOrNull { it.videoId == videoId }?.let { row ->
-            val f = java.io.File(row.filePath)
-            if (f.exists()) {
-                return android.net.Uri.fromFile(f).toString() to SongMetadata(
-                    title = row.title,
-                    artist = row.artist,
-                    album = null,
-                    thumbnailUrl = row.thumbnailUrl
-                )
-            }
-        }
-        // Phase 43: No separate cache. Check downloads database for local file.
-        
-        // In-session cache - only use if it's a local file
-        urlCache[videoId]?.let { pair ->
-            if (pair.first.startsWith("file://") || pair.first.startsWith("content://")) {
-                return pair
-            }
-        }
-        // Phase 41: Skip PlaybackCache for gapless window - it may contain stale
-        // stream URLs. Only return local files from the checks above.
-        return null
-    }
-
-    // Build a MediaItem tagged with its queue index in the request-metadata
-    // extras so PlaybackService can report exactly which track the playlist
-    // advanced to on a native (gapless) transition.
-    fun buildMediaItem(
-        videoId: String,
-        queueIdx: Int,
-        url: String,
-        meta: SongMetadata?
-    ): MediaItem {
-        val extras = android.os.Bundle().apply {
-            putInt("queue_index", queueIdx)
-            putString("video_id", videoId)
-        }
-        val builder = MediaItem.Builder()
-            .setMediaId(videoId)
-            .setUri(url)
-            .setRequestMetadata(
-                MediaItem.RequestMetadata.Builder().setExtras(extras).build()
-            )
-        if (meta != null) {
-            builder.setMediaMetadata(
-                androidx.media3.common.MediaMetadata.Builder()
-                    .setTitle(meta.title)
-                    .setArtist(meta.artist)
-                    .setAlbumTitle(meta.album)
-                    .setArtworkUri(meta.thumbnailUrl?.let { android.net.Uri.parse(it) })
-                    .build()
-            )
-        }
-        return builder.build()
-    }
-
-    // Extend the player's playlist forward with already-resolved tracks so it
-    // stays up to PRELOAD_AHEAD ahead of [currentIndex]. Stops at the first
-    // track that isn't cached yet, keeping the window strictly contiguous:
-    // player position p maps to queue index (windowStart + p).
-    fun syncPlayerWindow(currentIndex: Int) {
-        val c = controller ?: return
-        if (currentIndex < 0 || queue.isEmpty()) return
-        // Both the queue index and the playlist window must be confirmed by
-        // the controller: after a crossfade handoff the MediaSession moves to
-        // the standby player asynchronously. Appending against a stale window
-        // would duplicate tracks, so wait (callers poll) instead.
-        val currentTag = c.currentMediaItem?.requestMetadata?.extras
-            ?.getInt("queue_index", -1) ?: -1
-        if (currentTag != currentIndex || c.currentMediaItemIndex < 0) return
-        windowStart = currentIndex - c.currentMediaItemIndex
-        var nextToLoad = windowStart + c.mediaItemCount
-        while (nextToLoad <= currentIndex + PRELOAD_AHEAD && nextToLoad < queue.size) {
-            val q = queue[nextToLoad]
-            val cached = cachedOnly(q) ?: break
-            c.addMediaItem(buildMediaItem(q.videoId, nextToLoad, cached.first, cached.second))
-            nextToLoad++
-        }
-    }
-
-    // True once the controller's current item carries [index]. Crossfade
-    // handoffs swap the session player, and controller state trails that swap
-    // by a few frames.
-    suspend fun awaitCurrentTag(index: Int, timeoutMs: Long = 2_000L): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            val c = controller ?: return false
-            val tag = c.currentMediaItem?.requestMetadata?.extras
-                ?.getInt("queue_index", -1) ?: -1
-            if (tag == index) return true
-            kotlinx.coroutines.delay(30)
-        }
-        return false
-    }
-
-    // Update the now-playing UI, record the play and (re)fetch lyrics for the
-    // track at [index]. Shared by an explicit playFromQueue and by a native
-    // playlist transition reported through QueueAdvanceSignaler.trackChanged.
-    fun presentTrack(index: Int, meta: SongMetadata?) {
-        val q = queue.getOrNull(index) ?: return
+    fun presentTrack(q: QueueItem, meta: SongMetadata?) {
         nowPlayingTitle = meta?.title ?: q.title
         nowPlayingArtist = meta?.artist ?: q.artist
         nowPlayingThumbnail = meta?.thumbnailUrl
         isVideoMode = q.isVideo
         status = "Playing: ${nowPlayingTitle}"
-        if (q.localUri != null) {
-            // Local files have no library row to record and no lyrics source.
+        if (q.videoId.startsWith("content://") || q.videoId.startsWith("file://")) {
             lyrics = emptyList()
             lyricsLoading = false
             return
@@ -984,7 +702,7 @@ fun PlayerScreen(
             repo.recordPlay(
                 q.videoId,
                 meta?.title ?: q.title,
-                meta?.artist ?: "",
+                meta?.artist ?: q.artist,
                 meta?.album,
                 meta?.thumbnailUrl
             )
@@ -992,38 +710,12 @@ fun PlayerScreen(
         lyrics = emptyList()
         lyricsLoading = true
         val fetchTitle = meta?.title ?: q.title
-        val fetchArtist = meta?.artist ?: ""
+        val fetchArtist = meta?.artist ?: q.artist
         scope.launch {
             val result = LyricsHelper.fetch(fetchArtist, fetchTitle)
-            // Only apply if still the same track
-            if (nowPlayingTitle == fetchTitle) {
+            if (queueController?.currentUid?.value == q.uid) {
                 lyrics = result ?: emptyList()
                 lyricsLoading = false
-            }
-        }
-    }
-
-    // Silently download the next two suggestions so their playback is instant
-    // too. Serialised by Downloader's mutex; failures are swallowed.
-    fun downloadSuggestions(items: List<QueueItem>, startIndex: Int) {
-        val suggestions = (startIndex..(startIndex + 1)).mapNotNull { items.getOrNull(it) }
-        if (suggestions.isEmpty()) return
-        scope.launch {
-            for (s in suggestions) {
-                if (s.localUri != null) continue
-                if (downloadRepo.get(s.videoId)?.let { java.io.File(it.filePath).exists() } == true) continue
-                val song = runCatching { repo.get(s.videoId) }.getOrNull()
-                try {
-                    Downloader.download(
-                        context, settings, s.videoId,
-                        song?.title ?: s.title,
-                        song?.artist ?: "",
-                        song?.thumbnailUrl,
-                        0L
-                    )
-                } catch (e: Exception) {
-                    Log.w("DOWNLOAD", "suggestion download failed ${s.videoId}", e)
-                }
             }
         }
     }
@@ -1031,157 +723,64 @@ fun PlayerScreen(
     fun playFromQueue(
         items: List<QueueItem>,
         index: Int,
-        downloadAhead: Boolean = false,
-        prefetchAhead: Int = PRELOAD_AHEAD,
         mixTitle: String? = null
     ) {
-        if (controller == null) {
-            status = "Connecting..."
-            return
-        }
-        if (index !in items.indices) return
-        // The service keeps its playlist while the UI is gone; after an app
-        // restart the loaded window must be re-adopted or the "already loaded"
-        // check below would reset a perfectly playable queue.
-        if (items !== queue &&
-            !(queue.size == items.size && queue.zip(items).all { (a, b) -> a.videoId == b.videoId })
-        ) {
-            val c = controller!!
-            if (c.mediaItemCount > 0 && c.currentMediaItemIndex >= 0) {
-                windowStart = index - c.currentMediaItemIndex
-            }
-        }
-        // Any regular play request leaves the radio station; a mix request sets
-        // its seed so the Queue tab can show "Mix: …".
+        val target = items.getOrNull(index) ?: return
+        val qc = queueController ?: return
         activeMixTitle = mixTitle
-        // Supersede any in-flight rebuild: rapid Next taps must not leave two
-        // setMediaItems calls racing against different queue indices.
-        playJob?.cancel()
-        prefetchJob?.cancel()
-        val generation = ++playGeneration
-        queue = items
-        queueIndex = index
-        val item = items[index]
-        
-        // Phase 37: Fix "Previous Song" bug - stop and clear before new extraction
-        // to prevent audio overlap from previous track
-        controller?.let { c ->
-            c.stop()
-            c.clearMediaItems()
-        }
-        
-        status = "Extracting..."
-        if (downloadAhead) downloadSuggestions(items, index + 1)
-
-        // Replaying a track already inside the loaded window (e.g. a single-track
-        // queue restarted at the true end) must not reset it: the untouched
-        // tail keeps advancing natively instead of stopping after this track.
-        val live = controller
-        val windowTag = live?.currentMediaItem?.requestMetadata?.extras
-            ?.getInt("queue_index", -1) ?: -1
-        val loaded = windowTag >= 0 && windowStart + live!!.currentMediaItemIndex == windowTag
-        if (loaded && live != null) {
-            val loadedVideoId = live.currentMediaItem?.mediaId
-            queueIndex = windowStart + live.currentMediaItemIndex
-            status = "Playing: ${queue.getOrNull(queueIndex)?.title ?: item.title}"
-            if (loadedVideoId == item.videoId) {
-                live.play()
-            } else {
-                // Item is already prepared: a native, gapless seek.
-                live.seekToDefaultPosition(live.currentMediaItemIndex)
-                live.play()
-            }
-            presentTrack(queueIndex, null)
-            return
-        }
-
-        // Part B: resolution of the following tracks starts immediately, not
-        // after the seed finishes resolving — each one downloads into cache via
-        // yt-dlp so Next is instant and gapless.
-        val upcoming = (index + 1..index + prefetchAhead).filter { it < items.size }
-        prefetchJob = scope.launch {
-            var queued = 0
-            for (idx in upcoming) {
-                val next = items.getOrNull(idx) ?: continue
-                if (next.localUri == null) {
-                    preExtract(next.videoId, next.title)
-                    queued++
-                }
-                syncPlayerWindow(queueIndex)
-            }
-            DiagnosticsManager.recordPrefetch(
-                "Queued $queued track${if (queued == 1) "" else "s"}" +
-                    if (queued < upcoming.size) " (${upcoming.size - queued} already cached/downloaded)" else ""
-            )
-        }
-
-        playJob = scope.launch {
-            try {
-                // A fresh queue start is user-facing now: skip slow clients.
-                val result = extractOrCache(
-                    item.videoId, item.title, item.localUri, item.artist, immediateUse = true
-                )
-                // A superseded request may finish extraction after cancellation;
-                // never apply its stale window.
-                ensureActive()
-                if (generation != playGeneration) return@launch
-                val (url, meta) = result
-
-                // Build the initial MediaItem window: the current track plus any
-                // following tracks already resolved in cache. setMediaItems lets
-                // ExoPlayer advance between them natively (gapless).
-                val mediaItems = mutableListOf(
-                    buildMediaItem(item.videoId, index, url, meta)
-                )
-                val endIdx = minOf(index + PRELOAD_AHEAD, items.size - 1)
-                for (i in (index + 1)..endIdx) {
-                    val next = items[i]
-                    val cached = cachedOnly(next) ?: break
-                    mediaItems.add(buildMediaItem(next.videoId, i, cached.first, cached.second))
-                }
-                windowStart = index
-
-                controller!!.setMediaItems(mediaItems, 0, 0)
-                controller!!.prepare()
-                controller!!.play()
-                isPlaying = true
-                presentTrack(index, meta)
-                // Extend the window with whatever the prefetch resolved while
-                // the seed was extracting.
-                syncPlayerWindow(queueIndex)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                val msg = e.message ?: "unknown error"
-                Log.e("YTDL", "Failed: $msg")
-                status = "Error: $msg"
-                snackbarHostState.showSnackbar(
-                    if (e is OfflineException) {
-                        "Offline: Song not downloaded. Connect to internet to download."
-                    } else if (e is StreamingBlockedException) {
-                        e.message ?: "Streaming failed: YouTube API blocked."
-                    } else {
-                        "Couldn't play this track. Check your connection and try again."
-                    }
-                )
-            }
+        if (qc.queue.value.any { it.uid == target.uid }) {
+            qc.play(target.uid)
+        } else {
+            qc.replace(items, target.uid)
         }
     }
 
-    // Clean error handling: if playback fails, show a message and stop.
-    // No auto-fallback — yt-dlp already tried during resolution.
+    LaunchedEffect(currentUid) {
+        val item = queue.firstOrNull { it.uid == currentUid }
+        if (item == null) {
+            nowPlayingTitle = null
+            nowPlayingArtist = null
+            nowPlayingThumbnail = null
+            lyrics = emptyList()
+            lyricsLoading = false
+            isPlaying = false
+            currentPosMs = 0L
+            currentDurationMs = 0L
+        } else {
+            val metadata = controller?.currentMediaItem?.mediaMetadata
+            presentTrack(item, SongMetadata(
+                title = metadata?.title?.toString() ?: item.title,
+                artist = metadata?.artist?.toString() ?: item.artist,
+                album = metadata?.albumTitle?.toString(),
+                thumbnailUrl = metadata?.artworkUri?.toString()
+            ))
+        }
+    }
+
     DisposableEffect(controller) {
         val c = controller ?: return@DisposableEffect onDispose {}
+        isPlaying = c.isPlaying
+        isShuffled = c.shuffleModeEnabled
+        repeatMode = when (c.repeatMode) {
+            Player.REPEAT_MODE_ALL -> 1
+            Player.REPEAT_MODE_ONE -> 2
+            else -> 0
+        }
         val listener = object : Player.Listener {
+            override fun onIsPlayingChanged(playing: Boolean) { isPlaying = playing }
+            override fun onShuffleModeEnabledChanged(enabled: Boolean) { isShuffled = enabled }
+            override fun onRepeatModeChanged(mode: Int) {
+                repeatMode = when (mode) {
+                    Player.REPEAT_MODE_ALL -> 1
+                    Player.REPEAT_MODE_ONE -> 2
+                    else -> 0
+                }
+            }
             override fun onPlayerError(error: PlaybackException) {
-                DiagnosticsManager.recordPlayerError(error.errorCode, error.message.orEmpty())
-                
+                DiagnosticsManager.recordPlayerError(error.errorCode, "Local playback failed")
                 scope.launch {
                     snackbarHostState.showSnackbar("Playback failed. Try another song.")
                 }
-                
-                c.stop()
-                c.clearMediaItems()
             }
         }
         c.addListener(listener)
@@ -1189,145 +788,19 @@ fun PlayerScreen(
     }
 
     fun playNext() {
-        if (queueIndex < 0) return
-        val c = controller ?: return
-        if (queueIndex < queue.size - 1) {
-            if (c.hasNextMediaItem()) {
-                // Native, gapless advance; queueIndex updates via trackChanged.
-                c.seekToNextMediaItem()
-            } else {
-                // Next track wasn't cached when the window was built — reload.
-                playFromQueue(queue, queueIndex + 1)
-            }
-        } else if (repeatMode == 1 && queue.isNotEmpty()) {
-            // App-level repeat-all: wrap to the true queue start.
-            playFromQueue(queue, 0)
-        } else {
-            status = "End of queue"
-        }
+        controller?.seekToNextMediaItem()
     }
 
     fun playPrev() {
-        if (queueIndex < 0) return
-        val c = controller ?: return
-        if (queueIndex > 0) {
-            if (c.hasPreviousMediaItem()) {
-                // Native, gapless back; queueIndex updates via trackChanged.
-                c.seekToPreviousMediaItem()
-            } else {
-                playFromQueue(queue, queueIndex - 1)
-            }
-        } else {
-            status = "Start of queue"
-        }
-    }
-
-    // Native playlist transitions (auto-advance or seek) report the new queue
-    // index; sync the UI and keep the loaded window ahead of playback.
-    LaunchedEffect(Unit) {
-        QueueAdvanceSignaler.trackChanged.collect { newIndex ->
-            // Ignore the transition that echoes our own setMediaItems call in
-            // playFromQueue (same index we already presented).
-            if (newIndex == queueIndex) return@collect
-            if (newIndex !in queue.indices) return@collect
-            queueIndex = newIndex
-            val q = queue[newIndex]
-            presentTrack(newIndex, cachedOnly(q)?.second)
-            val upcoming = listOf(newIndex + 1, newIndex + 2, newIndex + 3)
-                .filter { it < queue.size }
-            scope.launch {
-                // On a crossfade handoff the session player swaps; wait for the
-                // controller to expose the new current item before touching the
-                // window so windowStart is derived from the right playlist.
-                awaitCurrentTag(newIndex)
-                upcoming.forEach { idx ->
-                    preExtract(queue[idx].videoId, queue[idx].title)
-                    syncPlayerWindow(queueIndex)
-                }
-            }
-        }
-    }
-
-    // The player exhausted its loaded items (STATE_ENDED). Load the next window
-    // or, at the true end of the queue, honour repeat-all.
-    LaunchedEffect(Unit) {
-        QueueAdvanceSignaler.queueEnded.collect {
-            if (queueIndex < queue.size - 1) {
-                playFromQueue(queue, queueIndex + 1)
-            } else if (repeatMode == 1 && queue.isNotEmpty()) {
-                // Last item of the app-side queue finished — wrap to the
-                // start (the controller deliberately runs REPEAT_MODE_OFF).
-                playFromQueue(queue, 0)
-            } else {
-                isPlaying = false
-                status = "End of queue"
-            }
-        }
-    }
-
-    // Crossfade engine: resolve the next track early when it is not loaded yet,
-    // then extend the playlist so the fade can overlap two real sources.
-    LaunchedEffect(Unit) {
-        QueueAdvanceSignaler.prefetchNext.collect { newIndex ->
-            if (newIndex !in queue.indices) return@collect
-            val item = queue[newIndex]
-            scope.launch {
-                if (item.localUri == null) preExtract(item.videoId, item.title)
-                syncPlayerWindow(queueIndex)
-            }
-        }
+        controller?.seekToPreviousMediaItem()
     }
 
     fun appendToQueue(song: Song) {
-        val item = QueueItem(song.videoId, song.title, song.artist)
-        if (queueIndex < 0 || queue.isEmpty()) {
-            // No active queue to append to — start the song instead of
-            // silently filling a queue the player isn't using.
-            playFromQueue(listOf(item), 0)
-            return
-        }
-        queue = queue + item
-        status = "Added to queue: ${song.title}"
-        // Appending leaves existing indices intact; let the window pick it up
-        // once it resolves.
-        syncPlayerWindow(queueIndex)
-    }
-
-    // "Play next" inserts mid-queue, shifting the queue index of every loaded
-    // MediaItem after the insertion point. Drop the stale tail and re-add it
-    // from the new queue so the queue_index tags match again. The current item
-    // and playback position are untouched (no prepare/reset).
-    fun relinkPlayerWindowTail() {
-        val c = controller ?: return
-        if (queueIndex < 0) return
-        val currentPos = c.currentMediaItemIndex
-        if (currentPos < 0) return
-        val suffixStart = currentPos + 1
-        if (c.mediaItemCount > suffixStart) {
-            c.removeMediaItems(suffixStart, c.mediaItemCount)
-        }
-        windowStart = queueIndex - currentPos
-        syncPlayerWindow(queueIndex)
+        queueController?.append(listOf(QueueItem(song.videoId, song.title, song.artist)))
     }
 
     fun insertIntoQueueNext(song: Song) {
-        val item = QueueItem(song.videoId, song.title, song.artist)
-        if (queueIndex < 0) {
-            // Nothing playing — start it
-            playFromQueue(listOf(item), 0)
-            return
-        }
-        val insertAt = queueIndex + 1
-        queue = queue.toMutableList().apply { add(insertAt, item) }
-        status = "Playing next: ${song.title}"
-        // Let any in-flight rebuild finish first so we relink the final window,
-        // then resolve the inserted track and refresh the tail.
-        val pending = playJob
-        scope.launch {
-            pending?.join()
-            preExtract(item.videoId, item.title)
-            relinkPlayerWindowTail()
-        }
+        queueController?.insertNext(QueueItem(song.videoId, song.title, song.artist))
     }
 
     // Phase 20: local songs/videos are already playable content URIs; no
@@ -1365,31 +838,11 @@ fun PlayerScreen(
                     Log.d("MIX", "silent mix for ${seed.videoId} returned no neighbours")
                     return@launch
                 }
-                val c = controller ?: return@launch
-                val mixQueue = mix.map { QueueItem(it.videoId, it.title, it.artist) }
-                // The user moved on while the mix was building: their queue wins.
-                if (queue.getOrNull(queueIndex)?.videoId != seed.videoId) {
-                    Log.d("MIX", "queue changed during build; discarding mix")
-                    return@launch
-                }
-                queue = mixQueue
-                // Re-resolve the current position: a gapless transition may
-                // have moved it while the mix was building.
-                queueIndex = mixQueue.indexOfFirst { it.videoId == seed.videoId }.coerceAtLeast(0)
-                // The seed's item is already playing; replace only the tail so
-                // position is untouched (no setMediaItems, no prepare, no seek).
-                val loadedIndex = c.currentMediaItemIndex
-                if (loadedIndex < 0) return@launch
-                if (c.mediaItemCount > loadedIndex + 1) {
-                    c.removeMediaItems(loadedIndex + 1, c.mediaItemCount)
-                }
-                windowStart = queueIndex - loadedIndex
-                syncPlayerWindow(queueIndex)
-                Log.d("MIX", "silent mix swapped in: ${mix.size} tracks around ${seed.videoId}")
-                status = "Mix ready: ${mix.size} tracks"
-                // Warm the first neighbours so skips are instant; re-sync after.
-                mix.drop(1).take(4).forEach { preExtract(it.videoId, it.title) }
-                syncPlayerWindow(queueIndex)
+                val qc = queueController ?: return@launch
+                if (qc.currentUid.value != seedItem.uid) return@launch
+                qc.append(mix.filter { it.videoId != seed.videoId }.map {
+                    QueueItem(it.videoId, it.title, it.artist)
+                })
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1399,98 +852,25 @@ fun PlayerScreen(
         }
     }
 
-    // Remove one queue entry, keeping the player window and queue index aligned.
-    fun dropFromQueue(idx: Int) {
-        if (idx !in queue.indices) return
-        val updated = queue.filterIndexed { i, _ -> i != idx }
-        val c = controller
-        if (c == null) {
-            queue = updated
-            if (idx < queueIndex) queueIndex--
-            if (idx < windowStart) windowStart--
-            return
-        }
-        // Loaded MediaItems carry absolute queue indices in their request
-        // extras, so removing anything inside the loaded window (or before it)
-        // requires rebuilding; otherwise later transitions report stale indices.
-        val affectsWindow = idx < windowStart + c.mediaItemCount
-        when {
-            idx == queueIndex -> {
-                if (updated.isEmpty()) {
-                    c.clearMediaItems()
-                    c.stop()
-                    queue = emptyList()
-                    queueIndex = -1
-                    windowStart = 0
-                    showNowPlaying = false
-                } else {
-                    playFromQueue(updated, idx.coerceAtMost(updated.size - 1))
-                }
-            }
-            affectsWindow -> {
-                // Restart the current logical track; its index shifts when the
-                // removed item was ahead of it.
-                playFromQueue(updated, if (idx < queueIndex) queueIndex - 1 else queueIndex)
-            }
-            else -> queue = updated
-        }
-    }
-
     fun removeFromQueue(item: QueueItem) {
-        val idx = queue.indexOfFirst { it.videoId == item.videoId }
-        if (idx < 0) return
-        dropFromQueue(idx)
-        status = "Removed from queue: ${item.title}"
+        queueController?.remove(item.uid)
     }
 
-    // Move an upcoming track directly behind the current one. Items before the
-    // current index are already played, so they are left in place.
     fun moveQueueItemNext(item: QueueItem) {
-        val idx = queue.indexOfFirst { it.videoId == item.videoId }
-        if (idx < 0 || queueIndex < 0) return
-        if (idx <= queueIndex) {
-            status = "Already played: ${item.title}"
-            return
-        }
-        if (idx == queueIndex + 1) {
-            status = "Already next: ${item.title}"
-            return
-        }
-        queue = queue.toMutableList().apply {
-            removeAt(idx)
-            add(queueIndex + 1, item)
-        }
-        status = "Playing next: ${item.title}"
-        relinkPlayerWindowTail()
+        queueController?.moveNext(item.uid)
     }
 
     fun clearQueue() {
-        controller?.let {
-            it.clearMediaItems()
-            it.stop()
-        }
-        queue = emptyList()
-        queueIndex = -1
-        windowStart = 0
-        nowPlayingTitle = null
-        nowPlayingArtist = null
-        nowPlayingThumbnail = null
-        isPlaying = false
-        currentPosMs = 0
-        currentDurationMs = 0
+        queueController?.clear()
+        activeMixTitle = null
+        mixGeneration++
         showNowPlaying = false
-        status = "Queue cleared"
     }
 
-    // Phase 22: hide the track for future mixes and drop it from the active queue.
     fun notInterested(song: Song) {
         scope.launch { repo.hide(song) }
-        val idx = queue.indexOfFirst { it.videoId == song.videoId }
-        if (idx < 0) {
-            status = "Hidden: ${song.title}"
-            return
-        }
-        dropFromQueue(idx)
+        queue.firstOrNull { it.uid == currentUid && it.videoId == song.videoId }
+            ?.let { queueController?.remove(it.uid) }
         status = "Not interested: ${song.title}"
     }
 
@@ -1589,66 +969,12 @@ fun PlayerScreen(
     }
 
     fun toggleVideoMode() {
-        val c = controller ?: return
-        if (queueIndex < 0) return
-        val item = queue[queueIndex]
-        // Local files carry both streams in the same URI — flipping the view
-        // is purely a UI concern and needs no re-extraction.
-        if (item.localUri != null) {
-            isVideoMode = !isVideoMode
-            status = if (isVideoMode) "Video mode" else "Audio mode"
+        val item = queue.firstOrNull { it.uid == currentUid } ?: return
+        if (!item.isVideo) {
+            status = "This download contains audio only"
             return
         }
-        val wasPlaying = c.isPlaying
-        val pos = c.currentPosition
-        val newMode = !isVideoMode
-        videoModeLoading = true
-        scope.launch {
-            try {
-                val meta = urlCache[item.videoId]?.second
-                    ?: YtdlpHelper.extractUrlAndMetadata(context, item.videoId)?.second
-
-                val url = if (newMode) {
-                    YtdlpHelper.extractVideoUrl(context, item.videoId)
-                } else {
-                    urlCache[item.videoId]?.first
-                        ?: YtdlpHelper.extractUrlAndMetadata(context, item.videoId)?.first
-                }
-                if (url == null) {
-                    status = "Toggle failed: extraction returned null"
-                    return@launch
-                }
-
-                val builder = androidx.media3.common.MediaItem.Builder().setUri(url)
-                if (meta != null) {
-                    builder.setMediaMetadata(
-                        androidx.media3.common.MediaMetadata.Builder()
-                            .setTitle(meta.title)
-                            .setArtist(meta.artist)
-                            .setAlbumTitle(meta.album)
-                            .apply {
-                                meta.thumbnailUrl?.let {
-                                    setArtworkUri(android.net.Uri.parse(it))
-                                }
-                            }
-                            .build()
-                    )
-                }
-                c.setMediaItem(builder.build())
-                c.prepare()
-                c.seekTo(pos)
-                if (wasPlaying) c.play()
-                isVideoMode = newMode
-                // The playlist was replaced by a single item for the current
-                // track; keep the window invariant (player pos 0 == queueIndex).
-                windowStart = queueIndex
-                status = if (newMode) "Video mode" else "Audio mode"
-            } catch (e: Exception) {
-                status = "Toggle failed: ${e.message}"
-            } finally {
-                videoModeLoading = false
-            }
-        }
+        isVideoMode = !isVideoMode
     }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -1669,25 +995,22 @@ fun PlayerScreen(
                 context = context,
                 scope = scope,
                 onPlay = { items, index -> playFromQueue(items, index) },
-                onDownload = { videoId, title, artist, album, trackNumber ->
-                    // Phase 43: Trigger permanent download to library
+                onDownload = { videoId, title, artist, album, trackNumber, durationMs ->
                     status = "Downloading to Library..."
                     loadingVideoId = videoId
                     scope.launch {
                         try {
-                            val file = Downloader.downloadSimple(
-                                context, settings, videoId, title, artist, youtubeThumb(videoId)
+                            val row = albumDownloads.downloadTrack(
+                                com.sharl.musicapp.data.download.DownloadRequest(
+                                    videoId, title, artist, youtubeThumb(videoId), durationMs
+                                ), album, trackNumber
                             )
-                            if (file != null) {
-                                repo.saveDownloadedSong(
-                                    videoId, title, artist, album, youtubeThumb(videoId), trackNumber
-                                )
-                                status = "Downloaded: $title"
-                            } else {
-                                status = "Download failed: $title"
-                            }
+                            status = if (row.videoId == videoId) "Downloaded: $title" else "Already downloaded: $title"
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
                         } catch (e: Exception) {
-                            status = "Download failed: ${e.message}"
+                            status = if (Downloader.stateOf(videoId) is DownloadState.WaitingForSpace)
+                                "Downloads paused: free storage and retry" else "Download failed: $title"
                         } finally {
                             if (loadingVideoId == videoId) loadingVideoId = null
                         }
@@ -1726,7 +1049,6 @@ fun PlayerScreen(
                 },
                 onPlaylistMenu = { pl -> playlistListMenu = pl },
                 loadingVideoId = loadingVideoId,
-                onPreExtract = { id -> scope.launch { preExtract(id) } }
             )
         } else if (showNowPlaying && nowPlayingTitle != null) {
             androidx.activity.compose.BackHandler(enabled = true) {
@@ -1775,9 +1097,10 @@ fun PlayerScreen(
                 queue = queue,
                 queueIndex = queueIndex,
                 queueTabLabel = activeMixTitle?.let { "Mix: $it" } ?: "Queue",
-                onQueueItemClick = { idx -> playFromQueue(queue, idx) },
+                onQueueItemClick = { uid -> queueController?.play(uid) },
                 onQueueItemMenu = { item -> queueMenuItem = item },
                 onClearQueue = { clearQueue() },
+                onClearUpcoming = { queueController?.clearUpcoming() },
                 onBack = { showNowPlaying = false },
                 onPlayPause = {
                     val c = controller ?: return@NowPlayingScreen
@@ -1833,13 +1156,10 @@ fun PlayerScreen(
                 },
                 onRepeatToggle = {
                     repeatMode = (repeatMode + 1) % 3
-                    // Repeat-all is app-level: the controller must NOT wrap
-                    // inside its loaded window, or ExoPlayer never reports
-                    // STATE_ENDED at the true queue end and the wrap to the
-                    // full queue (see queueEnded collector) is unreachable.
                     controller?.repeatMode = when (repeatMode) {
-                        2 -> androidx.media3.common.Player.REPEAT_MODE_ONE
-                        else -> androidx.media3.common.Player.REPEAT_MODE_OFF
+                        1 -> Player.REPEAT_MODE_ALL
+                        2 -> Player.REPEAT_MODE_ONE
+                        else -> Player.REPEAT_MODE_OFF
                     }
                 },
                 isFavorite = currentSong?.isFavorite == true,
@@ -2118,7 +1438,6 @@ fun PlayerScreen(
                     )
                     .clickable {
                         tab = 0
-                        urlCache.clear()
                     },
                 contentAlignment = Alignment.Center
             ) {
@@ -2154,7 +1473,6 @@ fun PlayerScreen(
                 HomeTab(
                     forYouTop = forYouTop,
                     forYouRecent = forYouRecent,
-                    onPreExtract = { id -> preExtract(id) },
                     onPlayFromQueue = { items, index -> playFromQueue(items, index) },
                     downloadIds = downloadIds,
                     loadingVideoId = loadingVideoId,
@@ -2205,7 +1523,6 @@ fun PlayerScreen(
                     localMatches = localMatches,
                     onLocalMatchesChange = { localMatches = it },
                     onSearchLocal = { q -> repo.searchLocal(q) },
-                    onPreExtract = { id -> preExtract(id) },
                     scope = scope,
                     onPlayFromQueue = { items, index -> playFromQueue(items, index) },
                     onStartMix = { startMix(it) },
@@ -2281,7 +1598,6 @@ fun PlayerScreen(
                     onDownloadDiscography = { name -> downloadDiscography(name) },
                     downloadIds = downloadIds,
                     loadingVideoId = loadingVideoId,
-                    onPreExtract = { id -> preExtract(id) },
                     onPlayFromQueue = { items, index -> playFromQueue(items, index) },
                     friendsConfigured = authRepo.configured,
                     signedIn = signedIn,

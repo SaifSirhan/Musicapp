@@ -44,11 +44,6 @@ class CrossfadeManagerTest {
         MediaItem.Builder()
             .setMediaId("track-$index")
             .setUri(Uri.fromFile(file))
-            .setRequestMetadata(
-                MediaItem.RequestMetadata.Builder()
-                    .setExtras(android.os.Bundle().apply { putInt("queue_index", index) })
-                    .build()
-            )
             .build()
 
     private fun wav(seconds: Int, name: String): File {
@@ -95,8 +90,6 @@ class CrossfadeManagerTest {
             playerB = b,
             crossfadeDurationMs = { 3_000L },
             onActivePlayerChanged = { newActive, old -> swapped.complete(newActive to old) },
-            onTrackChanged = {},
-            onPrefetchNext = {},
         )
         try {
             manager.start()
@@ -118,6 +111,9 @@ class CrossfadeManagerTest {
             assertTrue("expected fade to be running at 4.5 s", fadingAtMid)
             assertSame("standby B must become the active player", b, newActive)
             assertSame(a, old)
+            assertEquals("handoff preserves history", 2, b.mediaItemCount)
+            assertEquals("track-0", b.getMediaItemAt(0).mediaId)
+            assertEquals(1, b.currentMediaItemIndex)
             assertEquals(1f, b.volume, 0.001f)
             assertEquals(0f, a.volume, 0.001f)
             assertFalse(manager.isFading)
@@ -143,8 +139,6 @@ class CrossfadeManagerTest {
             playerB = b,
             crossfadeDurationMs = { 3_000L },
             onActivePlayerChanged = { _, _ -> swapped = true },
-            onTrackChanged = {},
-            onPrefetchNext = {},
         )
         try {
             manager.start()
@@ -186,8 +180,6 @@ class CrossfadeManagerTest {
             playerB = b,
             crossfadeDurationMs = { 3_000L },
             onActivePlayerChanged = { _, _ -> swapped = true },
-            onTrackChanged = {},
-            onPrefetchNext = {},
         )
         try {
             manager.start()

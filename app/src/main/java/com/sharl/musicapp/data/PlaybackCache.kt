@@ -28,9 +28,12 @@ object PlaybackCache {
     @Synchronized
     fun init(context: Context) {
         val ctx = context.applicationContext
+        // Reloading would drop entries published earlier in this process, such as a
+        // download that finished before the service was ever created.
+        if (appContext != null) return
         appContext = ctx
         val raw = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
-        mem.clear()
+        val persisted = LinkedHashMap<String, CachedStream>()
         if (raw != null) {
             try {
                 val arr = JSONArray(raw)
@@ -39,7 +42,7 @@ object PlaybackCache {
                     val id = o.optString("id")
                     val url = o.optString("url")
                     if (id.isBlank() || url.isBlank()) continue
-                    mem[id] = CachedStream(
+                    persisted[id] = CachedStream(
                         url = url,
                         title = o.optString("title"),
                         artist = o.optString("artist"),
@@ -48,9 +51,12 @@ object PlaybackCache {
                     )
                 }
             } catch (_: Exception) {
-                mem.clear()
+                persisted.clear()
             }
         }
+        persisted.putAll(mem)
+        mem.clear()
+        mem.putAll(persisted)
         save()
     }
 

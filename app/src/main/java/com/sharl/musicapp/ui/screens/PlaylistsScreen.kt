@@ -49,7 +49,6 @@ fun PlaylistsScreen(
     onSongMenu: (Song) -> Unit,
     onPlaylistMenu: (Playlist) -> Unit = {},
     loadingVideoId: String? = null,
-    onPreExtract: (String) -> Unit = {}
 ) {
     if (openPlaylistId != null) {
         val playlistSongs by remember(openPlaylistId) {
@@ -59,10 +58,6 @@ fun PlaylistsScreen(
         LaunchedEffect(openPlaylistId) {
             val list = playlistRepo.songs(openPlaylistId).first()
             Log.d("PLAYLIST", "loaded ${list.size} songs for playlist $openPlaylistId")
-        }
-
-        LaunchedEffect(openPlaylistId, playlistSongs.firstOrNull()?.videoId) {
-            playlistSongs.firstOrNull()?.videoId?.let { onPreExtract(it) }
         }
 
         PlaylistSongsContent(

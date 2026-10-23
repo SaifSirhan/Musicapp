@@ -18,6 +18,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.async
 
 /**
  * Owns two ExoPlayer instances so tracks can overlap for a true crossfade.
@@ -26,6 +27,7 @@ import kotlinx.coroutines.cancel
  * only the active player handles audio focus, so the standby player's stream
  * is never ducked (or paused by a focus loss) while it is being faded in.
  */
+@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
 class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
@@ -55,15 +57,10 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        // Phase 37: Back to basics - plain HTTP DataSource for local file playback.
-        // All extraction happens in MainActivity via yt-dlp cache, so we just play files.
-        val httpFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
-            .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(15_000)
-            .setAllowCrossProtocolRedirects(true)
-        
-        val dsFactory = androidx.media3.datasource.DefaultDataSource.Factory(this, httpFactory)
+        // Defense in depth: there is no network-capable upstream in this local-only service.
+        val dsFactory = androidx.media3.datasource.DefaultDataSource.Factory(
+            this, androidx.media3.datasource.DataSource.Factory { androidx.media3.datasource.FileDataSource() }
+        )
         val msFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dsFactory)
 
         val exoA = ExoPlayer.Builder(this)
@@ -80,7 +77,16 @@ class PlaybackService : MediaSessionService() {
         attachPlayer(exoA)
         attachPlayer(exoB)
 
-        mediaSession = MediaSession.Builder(this, exoA).build()
+        val cacheReady = serviceScope.async(Dispatchers.IO) {
+            com.sharl.musicapp.data.PlaybackCache.init(this@PlaybackService)
+        }
+        val resolver = LocalPlaybackResolver(this)
+        mediaSession = MediaSession.Builder(this, exoA)
+            .setCallback(LocalMediaSessionCallback(serviceScope) { item ->
+                cacheReady.await()
+                resolver.resolve(item)
+            })
+            .build()
 
         crossfadeManager = CrossfadeManager(
             scope = serviceScope,
@@ -97,9 +103,7 @@ class PlaybackService : MediaSessionService() {
                 runCatching { old.setAudioAttributes(audioAttributes, false) }
                     .onFailure { Log.w("CROSSFADE", "focus release failed", it) }
                 applyPlaybackSettingsTo(newActive)
-            },
-            onTrackChanged = { index -> QueueAdvanceSignaler.notifyTrackChanged(index) },
-            onPrefetchNext = { index -> QueueAdvanceSignaler.notifyPrefetchNext(index) }
+            }
         ).also { it.start() }
 
         val notificationProvider = DefaultMediaNotificationProvider.Builder(this).build()
@@ -109,7 +113,7 @@ class PlaybackService : MediaSessionService() {
         applyPlaybackSettings()
         prefs.registerOnSharedPreferenceChangeListener(settingsListener)
 
-        Log.d("CTRL", "PlaybackService created with simple HTTP DataSource")
+        Log.d("CTRL", "PlaybackService created with local-only DataSource")
     }
 
     private fun attachPlayer(player: ExoPlayer) {
@@ -126,16 +130,6 @@ class PlaybackService : MediaSessionService() {
             override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
                 if (player !== crossfadeManager?.active) return
                 Log.d("ISLAND", "title=${mediaMetadata.title} artist=${mediaMetadata.artist}")
-            }
-
-            override fun onPlaybackStateChanged(state: Int) {
-                // Only the active engine reports the end of the queue; the
-                // standby is stopped during every handoff.
-                if (state != Player.STATE_ENDED) return
-                if (player !== crossfadeManager?.active) return
-                if (crossfadeManager?.isFading == true) return
-                QueueAdvanceSignaler.notifyQueueEnded()
-                QueueAdvanceSignaler.notifyTrackEnded() // legacy
             }
         })
     }
@@ -177,6 +171,7 @@ class PlaybackService : MediaSessionService() {
     ): MediaSession? = mediaSession
 
     override fun onDestroy() {
+        serviceScope.cancel()
         prefs.unregisterOnSharedPreferenceChangeListener(settingsListener)
         crossfadeManager?.release()
         crossfadeManager = null
@@ -188,7 +183,6 @@ class PlaybackService : MediaSessionService() {
         playerA = null
         playerB?.release()
         playerB = null
-        serviceScope.cancel()
         Log.d("CTRL", "PlaybackService destroyed, dual players and session released")
         super.onDestroy()
     }

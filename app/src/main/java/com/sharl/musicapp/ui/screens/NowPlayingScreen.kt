@@ -101,9 +101,10 @@ fun NowPlayingScreen(
     queue: List<QueueItem>,
     queueIndex: Int,
     queueTabLabel: String = "Queue",
-    onQueueItemClick: (Int) -> Unit,
+    onQueueItemClick: (String) -> Unit,
     onQueueItemMenu: (QueueItem) -> Unit = {},
     onClearQueue: () -> Unit = {},
+    onClearUpcoming: () -> Unit = {},
     onBack: () -> Unit,
     onPlayPause: () -> Unit,
     skipSeconds: Int = 15,
@@ -460,6 +461,9 @@ fun NowPlayingScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.weight(1f)
                             )
+                            TextButton(onClick = onClearUpcoming) {
+                                Text("Clear upcoming")
+                            }
                             TextButton(onClick = onClearQueue) {
                                 Text("Clear Queue")
                             }
@@ -470,12 +474,12 @@ fun NowPlayingScreen(
                                 .fillMaxWidth()
                                 .weight(1f)
                         ) {
-                            itemsIndexed(queue, key = { _, item -> item.videoId }) { idx, item ->
+                            itemsIndexed(queue, key = { _, item -> item.uid }) { idx, item ->
                                 val isCurrent = idx == queueIndex
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable { onQueueItemClick(idx) }
+                                        .clickable { onQueueItemClick(item.uid) }
                                         .padding(start = 16.dp, end = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {

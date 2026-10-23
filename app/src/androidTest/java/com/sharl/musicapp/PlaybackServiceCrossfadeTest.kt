@@ -4,7 +4,6 @@ import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
 import androidx.core.content.ContextCompat
-import androidx.media3.common.MediaItem
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -55,22 +54,23 @@ class PlaybackServiceCrossfadeTest {
         var controller: MediaController? = null
         try {
             controller = withTimeout(15_000) { connected.await() }
-            val nextReached = async {
-                withTimeout(20_000) {
-                    QueueAdvanceSignaler.trackChanged.first { it == 1 }
+            val queue = QueueController(controller)
+            try {
+                val nextReached = async {
+                    withTimeout(20_000) { queue.currentUid.first { it == "track-1" } }
                 }
-            }
-            controller.setMediaItems(
-                listOf(item(first, 0), item(second, 1)),
-                0,
-                0
-            )
-            controller.prepare()
-            controller.play()
-
-            assertEquals(1, nextReached.await())
-            assertEquals("track-1", controller.currentMediaItem?.mediaId)
-            assertTrue("controller must still be playing after handoff", controller.isPlaying)
+                val items = listOf(first, second).mapIndexed { index, file ->
+                    val id = "svctest000$index"
+                    com.sharl.musicapp.data.PlaybackCache.put(id, Uri.fromFile(file).toString(), "Track $index", "", null, null)
+                    QueueItem(id, "Track $index", uid = "track-$index")
+                }
+                queue.replace(items, "track-0")
+                assertEquals("track-1", nextReached.await())
+                assertEquals("track-1", controller.currentMediaItem?.mediaId)
+                assertEquals("service handoff retains history", 2, controller.mediaItemCount)
+                assertEquals("track-0", controller.getMediaItemAt(0).mediaId)
+                assertTrue("controller must still be playing after handoff", controller.isPlaying)
+            } finally { queue.close() }
         } finally {
             runCatching { controller?.stop() }
             MediaController.releaseFuture(future)
@@ -78,19 +78,10 @@ class PlaybackServiceCrossfadeTest {
             SettingsRepo(context).crossfadeSeconds = 0
             first.delete()
             second.delete()
+            com.sharl.musicapp.data.PlaybackCache.remove("svctest0000")
+            com.sharl.musicapp.data.PlaybackCache.remove("svctest0001")
         }
     }
-
-    private fun item(file: File, index: Int): MediaItem =
-        MediaItem.Builder()
-            .setMediaId("track-$index")
-            .setUri(Uri.fromFile(file))
-            .setRequestMetadata(
-                MediaItem.RequestMetadata.Builder()
-                    .setExtras(android.os.Bundle().apply { putInt("queue_index", index) })
-                    .build()
-            )
-            .build()
 
     private fun wav(seconds: Int, name: String): File {
         val sampleRate = 44_100

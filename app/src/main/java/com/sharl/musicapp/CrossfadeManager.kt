@@ -22,18 +22,16 @@ import kotlinx.coroutines.launch
  * and their volumes are ramped every 50 ms. When the ramp finishes, the old
  * player is paused and the session is moved to the new player.
  *
- * The manager never resolves URLs itself: the UI owns extraction and is asked
- * to prefetch via [onPrefetchNext] when the next MediaItem is not loaded yet.
- * That keeps InnerTube/yt-dlp fallback logic in one place.
+ * The manager never resolves media itself: the session timeline already holds
+ * every upcoming local track, so a fade only needs a prepared standby engine.
  */
+@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
 class CrossfadeManager(
     private val scope: CoroutineScope,
     playerA: ExoPlayer,
     playerB: ExoPlayer,
     private val crossfadeDurationMs: () -> Long,
     private val onActivePlayerChanged: (newActive: ExoPlayer, oldActive: ExoPlayer) -> Unit,
-    private val onTrackChanged: (Int) -> Unit,
-    private val onPrefetchNext: (Int) -> Unit,
 ) {
 
     var active: ExoPlayer = playerA
@@ -46,7 +44,6 @@ class CrossfadeManager(
     private var loopJob: Job? = null
     private var fadeJob: Job? = null
     private var preparedMediaId: String? = null
-    private var prefetchSentForTag: Int? = null
 
     val isFading: Boolean get() = fading
 
@@ -89,6 +86,19 @@ class CrossfadeManager(
 
     private fun attach(player: ExoPlayer) {
         player.addListener(object : Player.Listener {
+            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                if (player === active && reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED)
+                    abortFade("timeline edited")
+            }
+
+            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+                if (player === active) abortFade("shuffle changed")
+            }
+
+            override fun onRepeatModeChanged(repeatMode: Int) {
+                if (player === active) abortFade("repeat changed")
+            }
+
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 if (player !== active) return
                 if (fading) {
@@ -97,9 +107,6 @@ class CrossfadeManager(
                 } else {
                     resetStandby()
                 }
-                prefetchSentForTag = null
-                val index = queueIndex(mediaItem)
-                if (index >= 0) onTrackChanged(index)
             }
 
             override fun onPositionDiscontinuity(
@@ -144,22 +151,15 @@ class CrossfadeManager(
         val duration = player.duration
         if (duration == C.TIME_UNSET || duration <= 0L) return
         val position = player.currentPosition
-        val tag = queueIndex(player.currentMediaItem)
         val nextIndex = player.nextMediaItemIndex
         val next = if (nextIndex >= 0) player.getMediaItemAt(nextIndex) else null
 
         // The queue changed under us (play-next insertion, skip): drop stale prep.
         if (preparedMediaId != null && next?.mediaId != preparedMediaId) resetStandby()
 
-        // Resolve the next URL well before it is needed. The UI handles this
-        // because it owns InnerTube/yt-dlp extraction.
-        val lead = maxOf(RESOLVE_LEAD_MS, configured + 5_000L)
-        if (tag >= 0 && position >= duration - lead && prefetchSentForTag != tag) {
-            prefetchSentForTag = tag
-            if (next == null) onPrefetchNext(tag + 1)
-        }
-
-        if (next == null) return
+        // Repeat-one and a one-item repeat-all stay on the active engine.
+        if (next == null || player.repeatMode == Player.REPEAT_MODE_ONE ||
+            nextIndex == player.currentMediaItemIndex) return
         val fadeStart = duration - configured
 
         // Buffer the next track a little ahead so the fade is not silent.
@@ -175,35 +175,39 @@ class CrossfadeManager(
         }
         val remaining = duration - position
         if (remaining < MIN_FADE_MEDIA_MS) return
-        beginFade(queueIndex(next), minOf(configured, remaining))
+        beginFade(next.mediaId, minOf(configured, remaining))
     }
 
-    /**
-     * Loads the resolved suffix of the active playlist (next track onwards)
-     * into the standby player, muted and paused. Preparing here means only the
-     * first few hundred KB still need to arrive when the fade starts.
-     */
+    /** Clone the entire timeline, including history and the actual shuffle traversal. */
     private fun prepareStandby(next: MediaItem) {
         val player = active
-        val currentIndex = player.currentMediaItemIndex
-        if (currentIndex < 0) return
-        val suffix = (currentIndex + 1 until player.mediaItemCount)
-            .map { player.getMediaItemAt(it) }
-        if (suffix.isEmpty()) return
+        val nextIndex = player.nextMediaItemIndex
+        if (nextIndex < 0) return
+        val playlist = (0 until player.mediaItemCount).map { player.getMediaItemAt(it) }
+        val order = mutableListOf<Int>()
+        var index = player.currentTimeline.getFirstWindowIndex(true)
+        while (index != C.INDEX_UNSET) {
+            order.add(index)
+            index = player.currentTimeline.getNextWindowIndex(index, Player.REPEAT_MODE_OFF, true)
+        }
         runCatching {
             standby.volume = 0f
             standby.playWhenReady = false
-            standby.setMediaItems(suffix, 0, 0L)
+            standby.setMediaItems(playlist, nextIndex, 0L)
+            standby.setShuffleOrder(androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder(order.toIntArray(), 0L))
+            standby.shuffleModeEnabled = player.shuffleModeEnabled
+            standby.repeatMode = player.repeatMode
+            standby.playbackParameters = player.playbackParameters
             standby.prepare()
             preparedMediaId = next.mediaId
-            Log.d(TAG, "standby prepared for ${next.mediaId} (${suffix.size} items)")
+            Log.d(TAG, "standby prepared for ${next.mediaId} (${playlist.size} items)")
         }.onFailure {
             Log.w(TAG, "standby prepare failed", it)
             resetStandby()
         }
     }
 
-    private fun beginFade(nextTag: Int, mediaFadeMs: Long) {
+    private fun beginFade(nextMediaId: String?, mediaFadeMs: Long) {
         val speed = active.playbackParameters.speed.coerceAtLeast(0.1f)
         // The configured duration is media time; at 2x it elapses twice as fast.
         val fadeMs = (mediaFadeMs / speed).toLong().coerceAtLeast(MIN_FADE_WALL_MS)
@@ -243,11 +247,11 @@ class CrossfadeManager(
                 // paused before it can auto-advance into the next item.
                 if (elapsed >= fadeMs - FINISH_EARLY_MS) break
             }
-            completeFade(nextTag)
+            completeFade(nextMediaId)
         }
     }
 
-    private fun completeFade(nextTag: Int) {
+    private fun completeFade(nextMediaId: String?) {
         if (!fading) return
         fading = false
         fadeJob = null
@@ -262,7 +266,6 @@ class CrossfadeManager(
         active = next
         standby = old
         preparedMediaId = null
-        prefetchSentForTag = null
 
         runCatching { onActivePlayerChanged(next, old) }
             .onFailure { Log.e(TAG, "session handoff failed", it) }
@@ -271,8 +274,7 @@ class CrossfadeManager(
         old.volume = 0f
         old.playWhenReady = false
 
-        if (nextTag >= 0) onTrackChanged(nextTag)
-        Log.d(TAG, "fade complete, active=${next.currentMediaItem?.mediaId}")
+        Log.d(TAG, "fade complete, target=$nextMediaId active=${next.currentMediaItem?.mediaId}")
     }
 
     private fun abortFade(reason: String) {
@@ -302,14 +304,10 @@ class CrossfadeManager(
         preparedMediaId = null
     }
 
-    private fun queueIndex(item: MediaItem?): Int =
-        item?.requestMetadata?.extras?.getInt("queue_index", -1) ?: -1
-
     private companion object {
         const val TAG = "CROSSFADE"
         const val TICK_MS = 100L
         const val RAMP_STEP_MS = 50L
-        const val RESOLVE_LEAD_MS = 20_000L
         const val PREPARE_LEAD_MS = 5_000L
         const val MIN_FADE_MEDIA_MS = 300L
         const val MIN_FADE_WALL_MS = 250L

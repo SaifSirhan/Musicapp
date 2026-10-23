@@ -43,7 +43,6 @@ import com.sharl.musicapp.ui.util.youtubeThumb
 fun ColumnScope.HomeTab(
     forYouTop: List<Song>,
     forYouRecent: List<Song>,
-    onPreExtract: suspend (String) -> Unit,
     onPlayFromQueue: (List<QueueItem>, Int) -> Unit,
     onSongMix: (Song) -> Unit,
     downloadIds: List<String>,
@@ -75,9 +74,6 @@ fun ColumnScope.HomeTab(
     // from the same chunk list, so page 1 can never spill into page 2.
     val quickPickChunks = androidx.compose.runtime.remember(quickPicks30) {
         quickPicks30.chunked(5)
-    }
-    androidx.compose.runtime.LaunchedEffect(quickPicks30.firstOrNull()?.videoId) {
-        quickPicks30.firstOrNull()?.videoId?.let { onPreExtract(it) }
     }
     val quickPickPages = quickPickChunks.size
     LazyColumn(

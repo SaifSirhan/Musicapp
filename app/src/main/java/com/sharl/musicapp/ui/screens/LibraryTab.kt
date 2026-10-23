@@ -87,7 +87,6 @@ fun ColumnScope.LibraryTab(
     onDownloadDiscography: (String) -> Unit,
     downloadIds: List<String>,
     loadingVideoId: String?,
-    onPreExtract: suspend (String) -> Unit,
     onPlayFromQueue: (List<QueueItem>, Int) -> Unit,
     friendsConfigured: Boolean,
     signedIn: Boolean,
@@ -323,7 +322,6 @@ fun ColumnScope.LibraryTab(
                             onSongMenu = { ps -> onPlaylistSongMenu(ps) },
                             onPlaylistMenu = { pl -> onPlaylistMenu(pl) },
                             loadingVideoId = loadingVideoId,
-                            onPreExtract = { id -> scope.launch { onPreExtract(id) } }
                         )
                     }
                 }
